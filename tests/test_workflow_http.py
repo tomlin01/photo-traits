@@ -190,6 +190,47 @@ class HTTPAcceptanceTests(OAuthFixture, unittest.TestCase):
             self.assertEqual(self.engine.reserved, 0)
             self.assertFalse(list(session.path.glob('*.jpg')))
 
+    def test_empty_tool_arguments_and_request_metadata_are_protocol_fields(self):
+        metadata = {'progressToken': 'PRIVATE_TEST_META', 'openai/locale': 'fixture',
+                    'openai/userAgent': 'PRIVATE_TEST_META'}
+        for params in ({'name': 'workflow_status', 'arguments': {}},
+                       {'name': 'workflow_status'},
+                       {'name': 'workflow_status', 'arguments': {}, '_meta': metadata},
+                       {'name': 'workflow_status', '_meta': metadata}):
+            with self.subTest(fields=sorted(params)), patch.object(h.w, 'call_tool', wraps=h.w.call_tool) as call:
+                status, _, body = self.request('POST', '/mcp',
+                    {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': params})
+                self.assertEqual(status, 200)
+                self.assertFalse(body['result'].get('isError'), body['result'])
+                self.assertEqual(body['result']['structuredContent']['mode'], 'mock')
+                self.assertEqual(body['result']['structuredContent']['cost_reserved_usd'], '0')
+                self.assertEqual(call.call_args.args[-1], {})
+                self.assertNotIn('PRIVATE_TEST_META', json.dumps(body))
+        self.assertFalse(self.engine.sessions)
+        self.engine.reader.download.assert_not_called()
+
+    def test_request_metadata_does_not_relax_arguments_identity_or_scopes(self):
+        for params in ({'name': 'workflow_status', '_meta': 'PRIVATE_TEST_META'},
+                       {'name': 'workflow_status', '_meta': []},
+                       {'name': 'workflow_status', '_meta': None},
+                       {'name': 'workflow_status', 'arguments': None},
+                       {'name': 'workflow_status', 'arguments': {'_meta': {'note': 'PRIVATE_TEST_META'}}},
+                       {'name': 'workflow_status', 'arguments': {'allow_live': True}},
+                       {'name': 'workflow_status', 'unexpected': 'PRIVATE_TEST_META'}):
+            with self.subTest(fields=sorted(params)):
+                status, _, body = self.request('POST', '/mcp',
+                    {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': params})
+                self.assertEqual(status, 200)
+                self.assertTrue(body['result']['isError'])
+                self.assertNotIn('PRIVATE_TEST_META', json.dumps(body))
+        request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {
+            'name': 'workflow_status', '_meta': {'sub': self.claims['sub'], 'scope': self.claims['scope']}}}
+        self.assertEqual(self.request('POST', '/mcp', request, token=False)[0], 401)
+        self.assertEqual(self.request('POST', '/mcp', request, changes={'sub': 'auth0|stranger'})[0], 401)
+        self.assertEqual(self.request('POST', '/mcp', request, changes={'scope': 'photo:analyze'})[0], 403)
+        self.assertFalse(self.engine.sessions)
+        self.engine.reader.download.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

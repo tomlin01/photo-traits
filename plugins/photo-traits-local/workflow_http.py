@@ -139,13 +139,17 @@ def dispatch(engine, principal, raw):
         result = {'tools': w.tool_definitions()}
     elif method == 'tools/call':
         try:
-            w.p.exact(params, ['name', 'arguments'])
+            # MCP permits omitted arguments and request metadata. Metadata is not
+            # a tool input or an authority signal and is never forwarded or stored.
+            w.p.exact(params, ['name'], ['arguments', '_meta'])
+            if '_meta' in params and not isinstance(params['_meta'], dict):
+                w.p.reject('Request metadata must be an object.')
             if not isinstance(params['name'], str):
                 raise ValueError()
             definition = next((d for d in w.tool_definitions() if d['name'] == params['name']), None)
             if definition and not set(definition['securitySchemes'][0]['scopes']) <= principal.scopes:
                 return 403, error(request_id, -32001, 'Required authorization scope is missing.')
-            result = w.call_tool(engine, principal, params['name'], params['arguments'])
+            result = w.call_tool(engine, principal, params['name'], params.get('arguments', {}))
         except (w.p.Invalid, w.attachments.DownloadError) as exc:
             result = {'isError': True, 'content': [{'type': 'text', 'text': str(exc)}]}
         except Exception:
