@@ -1,0 +1,11 @@
+# Reviewed deployment settings; applying this file is a separate operator action.
+services:
+  - type: web
+    name: photo-traits-mock
+    runtime: python
+    plan: free
+    branch: codex/render-mock
+    autoDeployTrigger: "off"
+    buildCommand: python -m pip install -r plugins/photo-traits-local/requirements-http.txt
+    startCommand: python plugins/photo-traits-local/workflow_http.py --workspace . --bind 0.0.0.0 --port "$PORT" --locked
+    healthCheckPath: /healthz

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+data/raw/*
+data/derived/*
+!data/raw/.gitkeep
+!data/derived/.gitkeep
+.env
+.env.*
+.DS_Store
+.local/
+/LOCAL_INTEGRATION.md
+/SYNC_STATUS.md
+/photo-traits-test-gray.jpg

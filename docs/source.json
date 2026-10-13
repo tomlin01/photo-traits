@@ -1,0 +1,34 @@
+{
+  "dataset": "Melops",
+  "species": "Symphodus melops",
+  "record_url": "https://zenodo.org/records/17404087",
+  "doi": "10.5281/zenodo.17404087",
+  "version": "2.0",
+  "paper_url": "https://www.nature.com/articles/s41597-026-07045-1",
+  "checked_on": "2026-10-11",
+  "metadata": {
+    "filename": "Melops_metadata.txt",
+    "url": "https://zenodo.org/api/records/17404087/files/Melops_metadata.txt/content",
+    "md5": "b91b37f4db6963896d5068f002c8222c",
+    "max_bytes": 5000000,
+    "bytes": 3003668,
+    "sha256": "1aff6010f232addbf33f10a90553be5292b8755839fe904f5e896bc5fa483741"
+  },
+  "license": {
+    "reported": "CC BY 4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/",
+    "status": "verified_record_api_cc-by-4.0"
+  },
+  "acquisition": {
+    "status": "metadata_verified",
+    "raw_metadata_obtained": true,
+    "images_obtained": 0,
+    "notes": "Metadata and readme matched pinned official MD5 during the recorded source check. No full image archive was downloaded. Local dev.py check verifies present metadata or explicitly skips when absent.",
+    "readme": {
+      "filename": "readme.pdf",
+      "bytes": 293585,
+      "md5": "1c3cbeb6fb8100fcf9af1d4bf34c54fc"
+    },
+    "scope": "Historical source validation; not a guarantee that the raw file exists in the current checkout."
+  }
+}
