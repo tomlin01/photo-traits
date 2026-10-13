@@ -13,7 +13,8 @@ from tests.test_workflow_http import h
 class LockedDeploymentTests(unittest.TestCase):
     def setUp(self):
         self.args = Namespace(workspace=Path('unused'), bind='127.0.0.1', port=0,
-                              attachment_host=[], locked=True)
+                              attachment_host=[], locked=True,
+                              discovery_issuer=None, discovery_resource=None)
         self.server, engine = h.startup(self.args)
         self.assertIsNone(engine)
         self.worker = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -24,6 +25,15 @@ class LockedDeploymentTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.worker.join(2)
+
+    def enable_discovery(self):
+        self.stop()
+        self.args.discovery_issuer = 'https://fixture.auth.example/'
+        self.args.discovery_resource = 'https://phototraits.example/mcp'
+        self.server, engine = h.startup(self.args)
+        self.assertIsNone(engine)
+        self.worker = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.worker.start()
 
     def request(self, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
@@ -71,9 +81,13 @@ class LockedDeploymentTests(unittest.TestCase):
         with patch.object(h, 'TokenVerifier', forbidden), patch.object(h.w, 'WorkflowEngine', forbidden), \
              patch.object(h.w.p, 'bind_workspace', forbidden), patch.object(h.w.attachments, 'SafeHTTPS', forbidden), \
              patch.object(h.os, 'environ', {}):
-            server, engine = h.startup(self.args)
-            server.server_close()
-            self.assertIsNone(engine)
+            for discovery in (False, True):
+                if discovery:
+                    self.args.discovery_issuer = 'https://fixture.auth.example/'
+                    self.args.discovery_resource = 'https://phototraits.example/mcp'
+                server, engine = h.startup(self.args)
+                server.server_close()
+                self.assertIsNone(engine)
             forbidden.assert_not_called()
         self.args.attachment_host = ['fixture.example']
         with self.assertRaises(ValueError):
@@ -91,6 +105,58 @@ class LockedDeploymentTests(unittest.TestCase):
                 h.startup(self.args)
             engine.assert_not_called()
             server.assert_not_called()
+
+    def test_public_discovery_keeps_exact_urls_and_never_reflects_host_or_origin(self):
+        self.enable_discovery()
+        expected = {'resource': self.args.discovery_resource,
+                    'authorization_servers': [self.args.discovery_issuer],
+                    'scopes_supported': ['photo:analyze', 'results:read'],
+                    'bearer_methods_supported': ['header']}
+        for path in ('/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'):
+            code, headers, body = self.request('GET', path, headers={
+                'Host': 'untrusted.example', 'Origin': 'https://untrusted.example',
+                'Authorization': 'Bearer synthetic-invalid-token'})
+            self.assertEqual(code, 200)
+            self.assertEqual(json.loads(body), expected)
+            self.assertEqual(headers['Cache-Control'], 'no-store')
+            self.assertEqual(self.request('HEAD', path)[::2], (200, b''))
+        self.assertEqual(json.loads(self.request('GET', '/healthz')[2])['authorization'], 'locked')
+        self.assertEqual(self.request('GET', '/.env.local')[0], 404)
+
+    def test_discovery_does_not_enable_any_mcp_operation_or_token_verification(self):
+        self.enable_discovery()
+        with patch.object(h.TokenVerifier, 'verify', side_effect=AssertionError('No JWT verification')):
+            self.test_initialize_list_and_every_tool_are_denied_before_dispatch()
+        code, headers, _ = self.request('GET', '/mcp', headers={'Host': 'untrusted.example'})
+        self.assertEqual(code, 401)
+        self.assertEqual(headers['WWW-Authenticate'],
+            'Bearer resource_metadata="https://phototraits.example/.well-known/oauth-protected-resource", '
+            'scope="photo:analyze results:read", error="invalid_token"')
+
+    def test_partial_or_unsafe_discovery_configuration_fails_closed(self):
+        cases = [
+            (None, 'https://phototraits.example/mcp'),
+            ('https://fixture.auth.example/', None),
+            ('http://fixture.auth.example/', 'https://phototraits.example/mcp'),
+            ('https://fixture.auth.example', 'https://phototraits.example/mcp'),
+            ('https://fixture.auth.example/?scope=x', 'https://phototraits.example/mcp'),
+            ('https://fixture.auth.example/', 'https://phototraits.example/mcp?sub=synthetic'),
+            ('https://fixture.auth.example/', 'https://phototraits.example/mcp#fragment'),
+            ('https://fixture.auth.example/', 'https://phototraits.example/mcp\r\nInjected: value'),
+            ('https://fixture.auth.example/', 'https://127.0.0.1/mcp'),
+        ]
+        for issuer, resource in cases:
+            with self.subTest(issuer=issuer, resource=resource):
+                self.args.discovery_issuer, self.args.discovery_resource = issuer, resource
+                with self.assertRaises(ValueError):
+                    h.startup(self.args)
+        self.args.discovery_issuer = 'https://fixture.auth.example/'
+        self.args.discovery_resource = 'https://phototraits.example/mcp'
+        self.args.locked = False
+        with patch.object(h.w.p, 'bind_workspace') as bind:
+            with self.assertRaises(ValueError):
+                h.startup(self.args)
+            bind.assert_not_called()
 
 
 if __name__ == '__main__':

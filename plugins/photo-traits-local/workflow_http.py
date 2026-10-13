@@ -155,15 +155,34 @@ def dispatch(engine, principal, raw):
     return 200, {'jsonrpc': '2.0', 'id': request_id, 'result': result}
 
 
-def make_server(engine, verifier, address=('127.0.0.1', 0)):
+def public_discovery(issuer, resource):
+    """Validate explicit public URLs without fetching keys or enabling authorization."""
+    issuer_parts, resource_parts = urlsplit(issuer), urlsplit(resource)
+    for value, parts in ((issuer, issuer_parts), (resource, resource_parts)):
+        w.attachments.target(value, {w.attachments.host_name(parts.hostname)})
+    if (issuer_parts.path != '/' or issuer_parts.query or resource_parts.path != '/mcp'
+            or resource_parts.query):
+        raise ValueError('Discovery requires an exact HTTPS issuer and /mcp resource.')
+    return {'resource': resource, 'authorization_servers': [issuer],
+            'scopes_supported': list(w.SCOPES), 'bearer_methods_supported': ['header']}
+
+
+def make_server(engine, verifier, address=('127.0.0.1', 0), *, discovery=None):
     locked = verifier is None
     if locked and engine is not None:
         raise ValueError('Locked transport must not have a workflow engine.')
     if not locked and engine is None:
         raise ValueError('Authenticated transport requires a workflow engine.')
+    if discovery is not None and not locked:
+        raise ValueError('Public-only discovery is restricted to locked transport.')
+    metadata = public_discovery(*discovery) if discovery is not None else (
+        {'resource': verifier.resource, 'authorization_servers': [verifier.issuer],
+         'scopes_supported': list(w.SCOPES), 'bearer_methods_supported': ['header']} if not locked else None)
     resource = urlsplit(verifier.resource) if not locked else None
     origin = resource.scheme + '://' + resource.netloc if resource else None
-    metadata_url = origin + '/.well-known/oauth-protected-resource' if origin else None
+    public_resource = urlsplit(metadata['resource']) if metadata else None
+    metadata_url = (public_resource.scheme + '://' + public_resource.netloc
+                    + '/.well-known/oauth-protected-resource') if public_resource else None
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
         server_version, sys_version = 'PhotoTraits/0.2', ''
@@ -186,11 +205,13 @@ def make_server(engine, verifier, address=('127.0.0.1', 0)):
             self.send_header('Connection', 'close')
             if status in (401, 403):
                 reason = 'invalid_token' if status == 401 else 'insufficient_scope'
-                if locked:
+                if metadata_url is None:
                     challenge = 'Bearer realm="PhotoTraits", error="invalid_token"'
                 else:
                     challenge = ('Bearer resource_metadata="' + metadata_url + '", scope="photo:analyze results:read", '
-                                 'error="' + reason + '", error_description="Sign in with the approved user and scopes"')
+                                 'error="' + reason + '"')
+                    if not locked:
+                        challenge += ', error_description="Sign in with the approved user and scopes"'
                 self.send_header('WWW-Authenticate', challenge)
             if status == 405:
                 self.send_header('Allow', 'POST')
@@ -207,7 +228,7 @@ def make_server(engine, verifier, address=('127.0.0.1', 0)):
 
         def target_ok(self):
             if locked:
-                # Only constant health/denial responses; no reflected host, file or workflow access.
+                # Only explicit public metadata/health/denials; never reflect request hosts.
                 return True
             hosts, origins = self.headers.get_all('Host', []), self.headers.get_all('Origin', [])
             if hosts != [resource.netloc] or len(origins) > 1 or (origins and origins[0] not in (origin, 'https://chatgpt.com')):
@@ -219,10 +240,9 @@ def make_server(engine, verifier, address=('127.0.0.1', 0)):
             if not self.target_ok():
                 return
             if self.path in ('/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'):
-                if locked:
+                if metadata is None:
                     return self.reply(503, {'error': 'Authorization is not configured.'})
-                self.reply(200, {'resource': verifier.resource, 'authorization_servers': [verifier.issuer],
-                                 'scopes_supported': list(w.SCOPES), 'bearer_methods_supported': ['header']})
+                self.reply(200, metadata)
             elif self.path == '/healthz':
                 self.reply(200, {'status': 'ok', 'mode': 'mock' if locked else engine.mode,
                                  'authorization': 'locked' if locked else 'configured'})
@@ -293,11 +313,16 @@ def make_server(engine, verifier, address=('127.0.0.1', 0)):
 
 
 def startup(args):
+    discovery = None
+    if args.discovery_issuer is not None or args.discovery_resource is not None:
+        if not args.locked or not args.discovery_issuer or not args.discovery_resource:
+            raise ValueError('Both discovery URLs require locked startup.')
+        discovery = (args.discovery_issuer, args.discovery_resource)
     if args.locked:
         if args.attachment_host:
             raise ValueError('Locked startup cannot accept attachment hosts.')
-        # No workspace binding, OAuth settings, key lookup, reader, engine or cleanup worker.
-        return make_server(None, None, (args.bind, args.port)), None
+        # Public URLs only; no workspace binding, environment/key lookup, reader or engine.
+        return make_server(None, None, (args.bind, args.port), discovery=discovery), None
     w.p.bind_workspace(args.workspace)
     # Public configuration only. Never look up OPENAI_API_KEY or .env.local.
     verifier = TokenVerifier(issuer=os.environ['PHOTOTRAITS_OAUTH_ISSUER'],
@@ -314,7 +339,9 @@ def main():
     parser.add_argument('--port', type=int, default=8767)
     parser.add_argument('--attachment-host', action='append', default=[])
     parser.add_argument('--locked', action='store_true',
-                        help='Serve only health and denials; OAuth and all workflow tools stay disabled.')
+                        help='Serve health, optional public discovery and denials; all workflow tools stay disabled.')
+    parser.add_argument('--discovery-issuer', help='Public HTTPS issuer, including its trailing slash; requires --locked.')
+    parser.add_argument('--discovery-resource', help='Public canonical HTTPS /mcp URL; requires --locked.')
     args = parser.parse_args()
     try:
         server, engine = startup(args)
