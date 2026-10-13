@@ -10,6 +10,13 @@ preview and complete rubric, obtain explicit approval, make at most one attempt,
 then preserve human corrections separately and export allowlisted CSV fields.
 Tool arguments cannot establish the user's identity or independently prove consent.
 
+Attachment hosts are denied unless explicitly allowlisted. For a structurally valid
+HTTPS URL on an unlisted host, `attach_photo` returns an error containing only
+`candidate_host` and `download_performed: false` to the authenticated session owner.
+This check precedes DNS, download and session changes, so an existing photo and
+preview confirmation remain intact. Malformed URLs receive a generic error. The
+hostname is untrusted input for review, never permission to add it to the allowlist.
+
 A changed image or field plan invalidates confirmation. Duplicate calls cannot
 resend the same attempt; cancellation does not refund a request already in flight.
 Unknown and unvalidated values remain unknown. Measurements from source records

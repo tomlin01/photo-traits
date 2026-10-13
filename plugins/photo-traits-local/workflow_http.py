@@ -150,6 +150,10 @@ def dispatch(engine, principal, raw):
             if definition and not set(definition['securitySchemes'][0]['scopes']) <= principal.scopes:
                 return 403, error(request_id, -32001, 'Required authorization scope is missing.')
             result = w.call_tool(engine, principal, params['name'], params.get('arguments', {}))
+        except w.attachments.HostNotAllowed as exc:
+            details = {'candidate_host': exc.candidate_host, 'download_performed': False}
+            result = {'isError': True, 'content': [{'type': 'text', 'text': w.p.t.encoded(details).decode()}],
+                      'structuredContent': details}
         except (w.p.Invalid, w.attachments.DownloadError) as exc:
             result = {'isError': True, 'content': [{'type': 'text', 'text': str(exc)}]}
         except Exception:

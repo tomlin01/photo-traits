@@ -231,6 +231,68 @@ class HTTPAcceptanceTests(OAuthFixture, unittest.TestCase):
         self.assertFalse(self.engine.sessions)
         self.engine.reader.download.assert_not_called()
 
+    def test_unlisted_attachment_hostname_only_reaches_authorized_session_owner(self):
+        principal = self.verifier.verify(self.token())
+        session = self.engine.new(principal)
+        session.edit('Purpose', 'Synthetic fixture', fields()[:1], 0)
+        resolver, connection = Mock(), Mock()
+        self.engine.reader = h.w.attachments.SafeHTTPS(resolver=resolver, connection=connection)
+        file = {'download_url': 'https://new.example/PRIVATE_PATH?PRIVATE_QUERY', 'file_id': 'PRIVATE_FILE_ID',
+                'file_name': 'PRIVATE_FILE_NAME.jpg', 'mime_type': 'image/jpeg'}
+        request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'attach_photo',
+                   'arguments': {'session_id': session.id, 'revision': session.revision, 'file': file}}}
+        with patch.object(self.engine.reader, 'check_descriptor', wraps=self.engine.reader.check_descriptor) as check:
+            for options, expected in (({'token': False}, 401), ({'changes': {'sub': 'auth0|stranger'}}, 401),
+                                      ({'changes': {'scope': 'results:read'}}, 403)):
+                status, _, body = self.request('POST', '/mcp', request, **options)
+                self.assertEqual(status, expected)
+                self.assertNotIn('new.example', json.dumps(body))
+                self.assertNotIn('candidate_host', json.dumps(body))
+            other = self.engine.new(h.w.Principal('synthetic-other-owner', frozenset(h.w.SCOPES)))
+            wrong_session = copy.deepcopy(request)
+            wrong_session['params']['arguments']['session_id'] = other.id
+            status, _, body = self.request('POST', '/mcp', wrong_session)
+            self.assertEqual(status, 200)
+            self.assertTrue(body['result']['isError'])
+            self.assertNotIn('candidate_host', json.dumps(body))
+            check.assert_not_called()
+            before = copy.deepcopy(session.state())
+            status, _, body = self.request('POST', '/mcp', request)
+            self.assertEqual(status, 200)
+            self.assertEqual(body['result'], {'isError': True,
+                'content': [{'type': 'text', 'text': t.encoded({'candidate_host': 'new.example', 'download_performed': False}).decode()}],
+                'structuredContent': {'candidate_host': 'new.example', 'download_performed': False}})
+            check.assert_called_once_with(file)
+            self.assertEqual(session.state(), before)
+        self.assertEqual(self.engine.reader.hosts, frozenset())
+        resolver.assert_not_called()
+        connection.assert_not_called()
+
+    def test_malformed_attachment_urls_never_reflect_hostname_or_private_values(self):
+        session = self.engine.new(self.verifier.verify(self.token()))
+        session.edit('Purpose', 'Synthetic fixture', fields()[:1], 0)
+        resolver, connection = Mock(), Mock()
+        self.engine.reader = h.w.attachments.SafeHTTPS(resolver=resolver, connection=connection)
+        before = copy.deepcopy(session.state())
+        for url in ('http://new.example/PRIVATE_PATH?PRIVATE_QUERY',
+                    'https://user:PRIVATE_PASSWORD@new.example/PRIVATE_PATH',
+                    'https://new.example:bad/PRIVATE_PATH', 'https://new.example:8443/PRIVATE_PATH',
+                    'https://new.example/PRIVATE_PATH#PRIVATE_FRAGMENT', 'https://[new.example/PRIVATE_PATH'):
+            status, _, body = self.request('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1,
+                'method': 'tools/call', 'params': {'name': 'attach_photo', 'arguments': {
+                    'session_id': session.id, 'revision': session.revision, 'file': {
+                        'download_url': url, 'file_id': 'PRIVATE_FILE_ID', 'file_name': 'PRIVATE_FILE_NAME.jpg'}}}})
+            self.assertEqual(status, 200)
+            self.assertEqual(body['result'], {'isError': True, 'content': [{'type': 'text',
+                'text': 'Attachment unavailable or unsafe. Reattach one JPEG; no automatic retry.'}]})
+            self.assertEqual(session.state(), before)
+        for path in session.path.rglob('*'):
+            if path.is_file():
+                self.assertNotIn(b'PRIVATE_', path.read_bytes())
+                self.assertNotIn(b'new.example', path.read_bytes())
+        resolver.assert_not_called()
+        connection.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

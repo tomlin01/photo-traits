@@ -72,6 +72,33 @@ class DownloadTests(unittest.TestCase):
                 self.fetch()
         self.connect.assert_not_called()
 
+    def test_unlisted_host_is_validated_metadata_only_before_any_network(self):
+        for host in ('new.example', 'attachments.example.evil', 'sub.attachments.example'):
+            for port in ('', ':443'):
+                self.file['download_url'] = f'https://{host}{port}/PRIVATE_PATH?signature=PRIVATE_QUERY'
+                with self.subTest(host=host, port=port), self.assertRaises(a.HostNotAllowed) as caught:
+                    self.fetch()
+                self.assertEqual(vars(caught.exception), {'candidate_host': host})
+                self.assertEqual(str(caught.exception), 'Attachment host is not allowlisted. No download performed.')
+        self.assertEqual(self.reader.hosts, frozenset({'attachments.example'}))
+        self.resolve.assert_not_called()
+        self.connect.assert_not_called()
+
+    def test_preflight_is_pure_and_malformed_urls_do_not_expose_a_hostname(self):
+        self.reader.check_descriptor(self.file)
+        malformed = ['http://new.example/PRIVATE_PATH', 'https://user:PRIVATE_PASSWORD@new.example/a',
+                     'https://new.example:bad/a', 'https://new.example:8443/a', 'https://new.example/a#PRIVATE_FRAGMENT',
+                     'https://new.example:/a', 'https://NEW.example/a', 'https://new.example./a',
+                     'https://[new.example/a', 'https://new.example\\@other.example/a']
+        for url in malformed:
+            with self.subTest(url=url), self.assertRaises(a.DownloadError) as caught:
+                self.reader.check_descriptor({**self.file, 'download_url': url})
+            self.assertNotIsInstance(caught.exception, a.HostNotAllowed)
+            self.assertFalse(vars(caught.exception))
+            self.assertEqual(str(caught.exception), 'Attachment unavailable or unsafe. Reattach one JPEG; no automatic retry.')
+        self.resolve.assert_not_called()
+        self.connect.assert_not_called()
+
     def test_tls_uses_numeric_address_and_original_server_name(self):
         context = Mock()
         conn = a.PinnedHTTPS('attachments.example', '1.1.1.1', 10, context)

@@ -52,6 +52,9 @@ def main():
     w, fixtures = module('workflow'), module('attachment_mock')
     w.p.bind_workspace(ROOT)
     class FixtureReader:
+        def check_descriptor(self, file):
+            w.attachments.target(w.attachments.descriptor(file), {'synthetic.invalid'})
+
         def download(self, _file, _cancelled):
             return fixtures.fixture_jpeg()
     engine = w.WorkflowEngine(ROOT / 'data/derived' / ('workflow-acceptance-' + stamp), reader=FixtureReader())

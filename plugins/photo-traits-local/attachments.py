@@ -27,6 +27,13 @@ class DownloadError(ValueError):
     pass
 
 
+class HostNotAllowed(DownloadError):
+    """Validated hostname only; never retain the supplied descriptor or URL."""
+    def __init__(self, host):
+        self.candidate_host = host_name(host)
+        super().__init__('Attachment host is not allowlisted. No download performed.')
+
+
 def reject():
     raise DownloadError('Attachment unavailable or unsafe. Reattach one JPEG; no automatic retry.')
 
@@ -64,12 +71,14 @@ def target(url, allowed_hosts):
         parts = urlsplit(url)
         host = host_name(parts.hostname)
         if (parts.scheme != 'https' or parts.username is not None or parts.password is not None
-                or parts.fragment or parts.port not in (None, 443) or host not in allowed_hosts
+                or parts.fragment or parts.port not in (None, 443)
                 or parts.netloc not in (host, host + ':443')):
             reject()
-        return host, (parts.path or '/') + ('?' + parts.query if parts.query else '')
     except (ValueError, TypeError, AttributeError):
         reject()
+    if host not in allowed_hosts:
+        raise HostNotAllowed(host)
+    return host, (parts.path or '/') + ('?' + parts.query if parts.query else '')
 
 
 def resolve_public(host, timeout):
@@ -131,7 +140,12 @@ class SafeHTTPS:
             reject()
         self.timeout = timeout
 
+    def check_descriptor(self, value):
+        """Pure preflight for callers that must reject before changing state."""
+        target(descriptor(value), self.hosts)
+
     def read(self, url, *, limit, mime_types, cancelled=None):
+        host, path = target(url, self.hosts)  # Recheck before DNS; safe rejection can reach the owner.
         conn = None
         deadline = self.clock() + self.timeout
         def remaining():
@@ -140,7 +154,6 @@ class SafeHTTPS:
                 reject()
             return value
         try:
-            host, path = target(url, self.hosts)
             addresses = public_addresses(self.resolver(host, remaining()))
             conn = self.connection(host, addresses[0], remaining(), self.context)
             conn.request('GET', path, headers={'Accept': ', '.join(mime_types), 'Accept-Encoding': 'identity'})

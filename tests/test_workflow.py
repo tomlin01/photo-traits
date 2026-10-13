@@ -154,6 +154,37 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(w.p.Invalid): self.s.edit('Changed', 'Fixture', fields()[:1], self.s.revision)
         self.assertEqual(self.engine.reserved, 0)
 
+    def test_unlisted_host_preserves_session_photo_and_preview_without_storing_descriptor(self):
+        self.s.edit('Purpose', 'Fixture', fields()[:1], 0)
+        resolver, connection = Mock(), Mock()
+        rejecting_reader = w.attachments.SafeHTTPS(resolver=resolver, connection=connection)
+        rejected = {**self.file, 'download_url': 'https://new.example/PRIVATE_PATH?PRIVATE_QUERY',
+                    'file_id': 'REJECTED_FILE_ID', 'file_name': 'REJECTED_FILE_NAME.jpg'}
+        def snapshot():
+            return copy.deepcopy((self.s.state(), self.s.offer, self.s.last_attachment,
+                                  self.s.uploaded, self.s.staging, self.engine.reserved)), {
+                str(path.relative_to(self.s.path)): path.read_bytes()
+                for path in self.s.path.rglob('*') if path.is_file()}
+        for existing_photo in (False, True):
+            if existing_photo:
+                self.engine.reader = self.reader
+                self.call('attach_photo', {'revision': self.s.revision, 'file': self.file})
+                self.call('preview_plan')
+            self.engine.reader = rejecting_reader
+            before = snapshot()
+            with self.subTest(existing_photo=existing_photo), \
+                 patch.object(rejecting_reader, 'download', wraps=rejecting_reader.download) as download, \
+                 self.assertRaises(w.attachments.HostNotAllowed):
+                self.call('attach_photo', {'revision': self.s.revision, 'file': rejected})
+            download.assert_not_called()
+            self.assertEqual(snapshot(), before)
+            for data in snapshot()[1].values():
+                for private in ('new.example', 'PRIVATE_PATH', 'PRIVATE_QUERY', 'REJECTED_FILE_ID', 'REJECTED_FILE_NAME'):
+                    self.assertNotIn(private.encode(), data)
+        self.assertEqual(rejecting_reader.hosts, frozenset())
+        resolver.assert_not_called()
+        connection.assert_not_called()
+
     def test_live_requests_have_only_confirmed_fields_and_sanitized_photo(self):
         self.live_fixture()
         offer = self.prepare(count=1)

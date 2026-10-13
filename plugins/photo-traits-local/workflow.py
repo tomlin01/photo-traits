@@ -67,6 +67,7 @@ class PhotoSession(p.Session):
                 p.reject('Discuss and define one or two fields before attaching a photo.')
             if self.last_attachment == (fingerprint, self.revision):
                 return
+            self.engine.reader.check_descriptor(file)  # No DNS, download or session changes on rejection.
             self.staging = True
             self.offer = None
         try:
