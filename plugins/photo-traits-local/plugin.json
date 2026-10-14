@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "photo-traits-local",
+  "version": "0.1.0",
+  "description": "Plan observable traits, select local JPEGs, confirm fields and review separate model and human results. Offline mock by default.",
+  "author": {"name": "PhotoTraits"},
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "PhotoTraits Local",
+        "shortDescription": "Local photo trait review",
+        "longDescription": "A local Python stdio MCP workflow with a browser photo picker and explicit field confirmation. Requires the existing photo-traits workspace. Not a hosted ChatGPT app.",
+        "developerName": "PhotoTraits",
+        "category": "Productivity",
+        "capabilities": ["Interactive"],
+        "defaultPrompt": "Help me define observable traits for one species, then review my selected photos."
+      }
+    }
+  }
+}

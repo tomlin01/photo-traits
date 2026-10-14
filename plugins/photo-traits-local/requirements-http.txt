@@ -1,0 +1,6 @@
+# OAuth RS256 verification only; core + mock tests retain a stdlib-only lane.
+# Resolved from official PyPI wheels on 2026-10-13. No SDK or model client added.
+PyJWT[crypto]==2.15.1
+cryptography==50.0.2
+cffi==2.1.1
+pycparser==3.11

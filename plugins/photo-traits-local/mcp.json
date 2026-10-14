@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "photo-traits": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "${PLUGIN_ROOT}/server.py",
+        "--workspace",
+        "/absolute/path/to/photo-traits",
+        "--stdio"
+      ],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}
