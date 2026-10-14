@@ -5,18 +5,24 @@ model candidates and human review. This is not species classification, identity
 verification, or physical measurement without calibration. Melops is a provisional
 metadata source, not a fixed product requirement.
 
-## Locked MOCK deployment
+## MOCK baseline
 
-The Render configuration starts Python with `--locked`. Only `/healthz` succeeds;
-all MCP initialization, tool listing and tool calls are rejected. No workflow
-engine, model key, attachment downloader or research workspace is opened in this
-mode. OAuth and cloud live inference are disabled.
+The checked-in Render template starts with `--locked`: only `/healthz` succeeds,
+and MCP initialization, tool listing and tool calls are rejected. It contains no
+account-specific OAuth values and opens no workflow engine, model key, attachment
+downloader or research workspace. This safe default differs from the separately
+configured, owner-authenticated MOCK service.
 
-See [deployment settings and checks](docs/RENDER_MOCK.md) and `render.yaml` for the
-Free Python service, dedicated branch, manual deploys and pinned Python version.
+On 2026-10-14, one actual ChatGPT photo completed the authenticated MOCK flow:
+field planning, attachment, preview, explicit human confirmation, one analysis,
+separate human review and validated CSV delivery to Library. No model was called;
+cost was zero and candidates remained unknown. Cross-surface web/desktop/iOS
+acceptance, live inference and scientific accuracy have not passed.
+
+See [sanitized configuration and acceptance status](docs/RENDER_MOCK.md) and
+`render.yaml` for the Free service, exact attachment hosts and remaining gates.
 No photos, research data, CSV results, credentials or local account configuration
-are included in this repository. Deployment settings are not proof that a service
-has been created or that ChatGPT host acceptance has passed.
+belong in this baseline. Committing it does not update the running service.
 
 ## Local validation
 
@@ -34,8 +40,11 @@ python3 -m venv .venv
 `init` itself never installs packages, downloads data, reads credentials or calls
 an API. `check` runs synthetic regressions and separately checks pinned metadata
 if already present; absent real data is explicitly reported as SKIP. Acceptance
-creates ignored synthetic evidence only. A mock test pass is not model accuracy,
-biological validation, or web/desktop/iOS host acceptance.
+reruns `init` and `check` and creates ignored synthetic evidence only; it does not
+retest the recorded ChatGPT run. The package installation above is a separate
+network step; an existing environment with the pinned dependencies can be reused.
+Use an installed Python 3.12+ executable explicitly if `python3` is older.
+A synthetic pass is not model accuracy, biological validation or host acceptance.
 
 ## Data and workflow rules
 

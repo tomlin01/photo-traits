@@ -1,9 +1,10 @@
 # PhotoTraits source package
 
 This package contains the one-photo workflow and its shared local review core.
-The Render entrypoint is `workflow_http.py --locked`; deployment details are in
-[RENDER_MOCK.md](../../docs/RENDER_MOCK.md). The published locked service exposes
-health only and rejects every MCP tool, even when a bearer token is supplied.
+The checked-in Render entrypoint is `workflow_http.py --locked`; this template
+exposes health only and rejects every MCP tool, even with a bearer token. The
+existing owner-authenticated MOCK service uses a separately configured start
+command. See [configuration and acceptance status](../../docs/RENDER_MOCK.md).
 
 ## Components
 
@@ -38,10 +39,11 @@ all regressions and a generated gray JPEG workflow, with scripted human-value
 fixtures and ignored synthetic CSV evidence. It does not register a plugin, connect
 a host account, download a real photo, access a real key or call a model.
 
-Web, native desktop and iOS acceptance remain separate future checks. They must
-verify real OAuth, file descriptors, a visible sanitized preview, explicit human
-approval, corrections and CSV delivery. A model-supplied boolean is not proof of
-human consent. Do not publish or enable an integration merely because tests pass.
+One actual ChatGPT photo completed the MOCK flow with explicit human confirmation,
+separate review and Library CSV delivery on 2026-10-14. This recorded host run is
+separate from the synthetic acceptance script; full web/desktop/iOS acceptance
+remains pending. A model-supplied boolean is not proof of human consent. Do not
+publish or enable an integration merely because tests pass.
 
 ## Biological and payment boundaries
 

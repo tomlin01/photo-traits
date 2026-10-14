@@ -1,4 +1,5 @@
-# Reviewed deployment settings; applying this file is a separate operator action.
+# Safe locked template; the existing authenticated MOCK service has private overrides.
+# Applying this file is a separate operator action; see docs/RENDER_MOCK.md.
 services:
   - type: web
     name: photo-traits-mock
@@ -9,6 +10,4 @@ services:
     buildCommand: python -m pip install -r plugins/photo-traits-local/requirements-http.txt
     startCommand: >-
       python plugins/photo-traits-local/workflow_http.py --workspace . --bind 0.0.0.0 --port "$PORT" --locked
-      --discovery-issuer https://dev-5g0tkmn8vsnn6r68.us.auth0.com/
-      --discovery-resource https://photo-traits-mock.onrender.com/mcp
     healthCheckPath: /healthz
