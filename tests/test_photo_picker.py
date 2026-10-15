@@ -326,6 +326,46 @@ class PhotoPickerHTTPTests(http_fixture.OAuthFixture, unittest.TestCase):
         for uri in ('file:///etc/passwd', '../workflow.py', h.w.PICKER_URI + '?x=1'):
             self.assertEqual(self.rpc('resources/read', {'uri': uri})[0], 400)
 
+    def test_resource_request_metadata_is_optional_and_never_reflected(self):
+        metadata = {'progressToken': 'PRIVATE_RESOURCE_META', 'openai/locale': 'fixture',
+                    'opaque': {'session_id': self.sid, 'photo': 'PRIVATE_RESOURCE_META'}}
+        for method, params in (('resources/list', {}), ('resources/read', {'uri': h.w.PICKER_URI})):
+            baseline = self.rpc(method, params)[2]
+            for meta in ({}, metadata):
+                with self.subTest(method=method, empty=not meta):
+                    status, _, body = self.rpc(method, {**params, '_meta': meta})
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body, baseline)
+                    self.assertNotIn('PRIVATE_RESOURCE_META', json.dumps(body))
+        self.reader.download.assert_not_called()
+        self.reader.check_descriptor.assert_not_called()
+
+    def test_resource_metadata_preserves_schema_uri_identity_and_scope_guards(self):
+        for method, base in (('resources/list', {}), ('resources/read', {'uri': h.w.PICKER_URI})):
+            for meta in (None, [], 'PRIVATE_RESOURCE_META', 1, True):
+                status, _, body = self.rpc(method, {**base, '_meta': meta})
+                self.assertEqual(status, 400)
+                self.assertEqual(body['error']['code'], -32602)
+                self.assertNotIn('PRIVATE_RESOURCE_META', json.dumps(body))
+            self.assertEqual(self.rpc(method, {**base, '_meta': {}, 'extra': 'PRIVATE_EXTRA'})[0], 400)
+            params = {**base, '_meta': {'sub': self.claims['sub'], 'scope': self.claims['scope']}}
+            for options, expected in (({'token': False}, 401), ({'changes': {'sub': 'other'}}, 401),
+                                       ({'changes': {'scope': 'results:read'}}, 403)):
+                self.assertEqual(self.rpc(method, params, **options)[0], expected)
+        for params in ({'_meta': {'uri': h.w.PICKER_URI}}, {'uri': None, '_meta': {}},
+                       {'uri': 'https://private.invalid/PRIVATE_SIGNED_URL', '_meta': {}},
+                       {'uri': h.w.PICKER_URI + '?PRIVATE_QUERY', '_meta': {}}):
+            status, _, body = self.rpc('resources/read', params)
+            self.assertEqual(status, 400)
+            self.assertNotIn('PRIVATE_', json.dumps(body))
+        self.assertEqual(self.rpc('resources/list', {'uri': h.w.PICKER_URI, '_meta': {}})[0], 400)
+
+    def test_resource_metadata_keeps_original_body_limit(self):
+        for method, base in (('resources/list', {}), ('resources/read', {'uri': h.w.PICKER_URI})):
+            status, _, body = self.rpc(method, {**base, '_meta': {'opaque': 'x' * h.MAX_BODY}})
+            self.assertEqual(status, 400)
+            self.assertEqual(body['error']['message'], 'Request too large.')
+
     def test_maximum_file_roundtrip_and_all_other_requests_keep_old_body_limit(self):
         data = padded_jpeg(1_000_000)
         args = {'session_id': self.sid, 'revision': 1, 'jpeg_base64': encoded(data)}

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 from urllib.parse import urlsplit
@@ -114,6 +115,58 @@ def error(request_id, code, message):
     return {'jsonrpc': '2.0', 'id': request_id, 'error': {'code': code, 'message': message}}
 
 
+class TemporaryResourceDiagnostics:
+    """Remove after the approved UI check: at most 12 request pairs / 30 minutes.
+
+    Never retain raw input. HTTP/RPC values describe dispatch, not client receipt.
+    Only authenticated, bounded resource requests reach this observer.
+    """
+    MAX_REQUESTS, MAX_SECONDS, MAX_LINE_BYTES = 12, 1800, 256
+
+    def __init__(self, *, clock=time.monotonic, sink=None):
+        self.clock = clock
+        self.expires = clock() + self.MAX_SECONDS
+        self.remaining = self.MAX_REQUESTS
+        self.lock = threading.Lock()
+        self.sink = sink or (lambda line: print(line, file=sys.stderr, flush=True))
+
+    def begin(self, raw, started):
+        if len(raw) > MAX_BODY:
+            return None
+        try:
+            request = json_bytes(raw)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return None
+        if not isinstance(request, dict) or request.get('method') not in ('resources/read', 'resources/list'):
+            return None
+        params = request.get('params', {})
+        record = {'method': request['method'],
+                  'uri': w.PICKER_URI if isinstance(params, dict) and params.get('uri') == w.PICKER_URI else '[redacted]',
+                  'meta_present': isinstance(params, dict) and '_meta' in params}
+        with self.lock:
+            if self.remaining == 0 or self.clock() >= self.expires:
+                return None
+            self.remaining -= 1
+        ticket = (record, started)
+        self.emit(ticket, None, 'pending')
+        return ticket
+
+    def emit(self, ticket, status, rpc_status):
+        if ticket is None:
+            return
+        record, started = ticket
+        # All output values are enums, bounded numbers, a boolean, or the fixed URI.
+        row = {**record, 'elapsed_ms': min(3_600_000, max(0, int((self.clock() - started) * 1000))),
+               'http_status': status if type(status) is int and status in (200, 400, 403, 500) else None,
+               'rpc_status': rpc_status if rpc_status in ('pending', 'ok', -32700, -32600, -32601, -32602, -32603, -32001) else 'unknown'}
+        line = 'PT_RESOURCE_DIAG ' + json.dumps(row, separators=(',', ':'), ensure_ascii=True)
+        if len(line.encode('ascii')) <= self.MAX_LINE_BYTES:
+            try:
+                self.sink(line)
+            except Exception:
+                pass  # A diagnostic sink must not affect the request or leak exceptions.
+
+
 def dispatch(engine, principal, raw):
     if len(raw) > MAX_UPLOAD_BODY:
         return 400, error(None, -32600, 'Request too large.')
@@ -150,10 +203,13 @@ def dispatch(engine, principal, raw):
     elif method in ('resources/list', 'resources/read'):
         if not isinstance(principal, w.Principal) or not set(w.SCOPES) <= principal.scopes:
             return 403, error(request_id, -32001, 'Required authorization scope is missing.')
+        allowed = {'_meta'} if method == 'resources/list' else {'uri', '_meta'}
+        if params.keys() - allowed or ('_meta' in params and not isinstance(params['_meta'], dict)):
+            return 400, error(request_id, -32602, 'Invalid UI resource parameters.')
         resource = {'uri': w.PICKER_URI, 'name': 'PhotoTraits photo picker', 'mimeType': w.PICKER_MIME}
-        if method == 'resources/list' and params == {}:
+        if method == 'resources/list':
             result = {'resources': [resource]}
-        elif method == 'resources/read' and params == {'uri': w.PICKER_URI}:
+        elif params.get('uri') == w.PICKER_URI:
             # Only a static packaged resource; never turn a URI into a filesystem path.
             result = {'contents': [{'uri': w.PICKER_URI, 'mimeType': w.PICKER_MIME,
                 'text': Path(__file__).with_name('photo_picker.html').read_text(encoding='utf-8'),
@@ -215,6 +271,7 @@ def make_server(engine, verifier, address=('127.0.0.1', 0), *, discovery=None):
     public_resource = urlsplit(metadata['resource']) if metadata else None
     metadata_url = (public_resource.scheme + '://' + public_resource.netloc
                     + '/.well-known/oauth-protected-resource') if public_resource else None
+    diagnostics = TemporaryResourceDiagnostics() if not locked and engine.mode == 'mock' else None
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
         server_version, sys_version = 'PhotoTraits/0.2', ''
@@ -285,6 +342,7 @@ def make_server(engine, verifier, address=('127.0.0.1', 0), *, discovery=None):
             self.do_GET()
 
         def do_POST(self):
+            started = time.monotonic()
             if not self.target_ok():
                 return
             if self.path != '/mcp':
@@ -310,7 +368,15 @@ def make_server(engine, verifier, address=('127.0.0.1', 0), *, discovery=None):
             raw = self.rfile.read(int(lengths[0]))
             if len(raw) != int(lengths[0]):
                 return self.send_error(400)
-            status, result = dispatch(engine, principal, raw)
+            ticket = diagnostics.begin(raw, started) if diagnostics is not None else None
+            try:
+                status, result = dispatch(engine, principal, raw)
+            except Exception:
+                if diagnostics is not None:
+                    diagnostics.emit(ticket, 500, -32603)
+                raise
+            if diagnostics is not None:
+                diagnostics.emit(ticket, status, result.get('error', {}).get('code', 'ok') if isinstance(result, dict) else 'ok')
             if status == 403 and isinstance(result, dict) and result.get('error', {}).get('code') == -32001:
                 result = {'jsonrpc': '2.0', 'id': result['id'], 'result': {'isError': True,
                     'content': [{'type': 'text', 'text': 'Required authorization scope is missing.'}],
