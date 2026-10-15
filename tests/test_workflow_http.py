@@ -174,7 +174,7 @@ class HTTPAcceptanceTests(OAuthFixture, unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(response['result']['serverInfo']['name'], 'PhotoTraits')
             status, _, response = self.request('POST', '/mcp', {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})
-            self.assertEqual(len(response['result']['tools']), 11)
+            self.assertEqual(len(response['result']['tools']), 13)
             self.assertTrue(all(d['securitySchemes'][0]['type'] == 'oauth2' for d in response['result']['tools']))
             self.assertTrue(all(d['_meta']['securitySchemes'] == d['securitySchemes'] for d in response['result']['tools']))
             attach = next(d for d in response['result']['tools'] if d['name'] == 'attach_photo')

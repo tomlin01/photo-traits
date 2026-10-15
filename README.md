@@ -24,6 +24,10 @@ See [sanitized configuration and acceptance status](docs/RENDER_MOCK.md) and
 No photos, research data, CSV results, credentials or local account configuration
 belong in this baseline. Committing it does not update the running service.
 
+The [local photo picker prototype](docs/PHOTO_PICKER_PROTOTYPE.md) adds an optional
+MOCK-only file input and bounded bytes tool. It is undeployed; its simulated host
+tests do not establish actual ChatGPT file-picker or bridge-size support.
+
 ## Local validation
 
 Use Python 3.12 or newer. Core metadata and local mock paths use the standard

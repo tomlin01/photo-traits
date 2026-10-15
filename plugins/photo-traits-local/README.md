@@ -15,12 +15,14 @@ command. See [configuration and acceptance status](../../docs/RENDER_MOCK.md).
 - `attachments.py`: bounded HTTPS downloads from explicitly approved exact hosts;
   no redirects, private addresses, forwarded credentials or arbitrary file paths.
 - `workflow_http.py`: RS256 OAuth transport, plus explicit health-only locked startup.
+- `photo_picker.html`: optional MOCK file picker using the MCP Apps bridge;
+  see [prototype limits and validation](../../docs/PHOTO_PICKER_PROTOTYPE.md).
 - `server.py` / `ui.html`: the shared core and optional loopback review interface.
 - `attachment_mock.py`, `capabilities_server.py`, `capabilities_http.py`, and
   `descriptor_probe.py`: synthetic/diagnostic sources retained for regression tests.
   They are not launched by the Render start command.
 
-All eleven workflow tools require a verified principal outside locked mode. OAuth
+All thirteen workflow tools require a verified principal outside locked mode. OAuth
 configuration must supply issuer, canonical HTTPS resource and an approved immutable
 subject. Missing configuration cannot create an anonymous workflow. Attachment hosts
 are empty by default. There is no hosted live CLI option or cloud spending ledger.

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhotoTraits 選擇照片</title>
+<style>
+  :root { color-scheme: light dark; font: 15px/1.55 system-ui, sans-serif; }
+  body { margin: 0; padding: 20px; color: CanvasText; background: Canvas; }
+  main { max-width: 560px; margin: auto; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  p { margin: 8px 0 16px; }
+  label { display: block; font-weight: 600; margin-bottom: 8px; }
+  input { max-width: 100%; }
+  button { font: inherit; padding: 8px 14px; border: 1px solid GrayText;
+    border-radius: 8px; cursor: pointer; color: ButtonText; background: ButtonFace; }
+  button:disabled { opacity: .55; cursor: default; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+  #status { min-height: 3em; }
+  small { display: block; color: GrayText; }
+</style>
+<main>
+  <h1>選擇一張照片 · MOCK</h1>
+  <p>JPEG，上限 1,000,000 bytes，長寬各不超過 2048 像素。傳送後請回到聊天，查看去除 metadata 的預覽並確認欄位，才會進行分析。</p>
+  <label for="photo">照片</label>
+  <input id="photo" type="file" accept="image/jpeg,.jpg,.jpeg" disabled aria-describedby="status">
+  <div class="actions">
+    <button id="upload" type="button" disabled>傳送照片</button>
+    <button id="clear" type="button" disabled>清除選取</button>
+  </div>
+  <p id="status" role="status" aria-live="polite">正在連接選檔介面…</p>
+  <small>只接受這次工作階段的一張照片。選檔不代表同意分析；替換照片後需要重新確認。暫存最長 30 分鐘，分析完成或取消後清除照片。</small>
+</main>
+<script>
+(() => {
+  'use strict';
+  const MAX_BYTES = 1000000, VERSION = '2026-01-26';
+  const photo = document.getElementById('photo');
+  const upload = document.getElementById('upload');
+  const clear = document.getElementById('clear');
+  const status = document.getElementById('status');
+  const pending = new Map();
+  let nextId = 1, origin = null, ready = false, ended = false, busy = false;
+  let state = null, selected = null, expiryTimer = null;
+
+  function post(message) {
+    // Initial handshake contains no image or session data. Pin the parent's
+    // origin on its matching reply; opaque sandbox origins require '*'.
+    window.parent.postMessage({jsonrpc: '2.0', ...message}, origin && origin !== 'null' ? origin : '*');
+  }
+  function request(method, params, timeout) {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error('timeout')); }, timeout);
+      pending.set(id, {resolve, reject, timer});
+      post({id, method, params});
+    });
+  }
+  function clearSelection() { selected = null; photo.value = ''; }
+  function current() { return state && Date.now() < state.expires_at_unix * 1000; }
+  function controls() {
+    const active = ready && !ended && !busy && current();
+    photo.disabled = !active;
+    upload.disabled = !active || !selected;
+    clear.disabled = !active || !selected;
+  }
+  function stop(message) {
+    ended = true;
+    state = null;
+    clearSelection();
+    clearTimeout(expiryTimer);
+    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error('closed')); }
+    pending.clear();
+    status.textContent = message;
+    controls();
+  }
+  function validState(value) {
+    return value && /^[a-f0-9]{32}$/.test(value.session_id) && Number.isSafeInteger(value.revision)
+      && value.revision >= 0 && value.mode === 'mock' && value.jpeg_max_bytes === MAX_BYTES
+      && typeof value.has_photo === 'boolean' && Number.isFinite(value.expires_at_unix);
+  }
+  function setState(value) {
+    if (!validState(value) || (state && (value.session_id !== state.session_id || value.revision < state.revision))) {
+      throw new Error('invalid result');
+    }
+    // Copy only the bounded fields we use; do not retain a raw tool result.
+    state = {session_id: value.session_id, revision: value.revision,
+      expires_at_unix: value.expires_at_unix, has_photo: value.has_photo};
+    clearTimeout(expiryTimer);
+    if (!current()) { stop('工作階段已到期，請回到聊天重新開始。'); return; }
+    expiryTimer = setTimeout(() => stop('工作階段已到期，請回到聊天重新開始。'),
+      Math.min(1800000, state.expires_at_unix * 1000 - Date.now()));
+    controls();
+  }
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent || (origin !== null && event.origin !== origin)) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== '2.0') return;
+    if (!message.method && pending.has(message.id)
+        && (Object.hasOwn(message, 'result') !== Object.hasOwn(message, 'error'))) {
+      const item = pending.get(message.id);
+      if (origin === null) origin = event.origin;
+      clearTimeout(item.timer); pending.delete(message.id);
+      if (Object.hasOwn(message, 'error')) item.reject(new Error('host error'));
+      else item.resolve(message.result);
+      return;
+    }
+    if (!ready) return;
+    if (message.method === 'ui/resource-teardown' && Object.hasOwn(message, 'id')) {
+      stop('選檔介面已關閉。');
+      post({id: message.id, result: {}});
+      return;
+    }
+    if (ended) return;
+    if (message.method === 'ping' && Object.hasOwn(message, 'id')) {
+      post({id: message.id, result: {}});
+    } else if (message.method === 'ui/notifications/tool-cancelled') {
+      stop('操作已取消，請回到聊天確認工作階段狀態。');
+    } else if (message.method === 'ui/notifications/tool-result' && !state && !busy) {
+      try {
+        if (message.params?.isError) throw new Error('tool error');
+        setState(message.params?.structuredContent);
+        if (!ended) status.textContent = state.has_photo
+          ? '已有暫存照片。傳送新照片會替換它，並需要重新確認。' : '請選擇一張 JPEG。';
+      } catch { stop('無法取得有效工作階段，請回到聊天重新開啟選檔介面。'); }
+    }
+  });
+  photo.addEventListener('change', () => {
+    if (ended || busy || !current()) { clearSelection(); controls(); return; }
+    const files = photo.files;
+    const file = files?.length === 1 ? files[0] : null;
+    if (!file || !Number.isSafeInteger(file.size) || file.size <= 0 || file.size > MAX_BYTES
+        || (file.type && file.type !== 'image/jpeg')) {
+      clearSelection(); status.textContent = '請選擇一張不超過 1,000,000 bytes 的 JPEG。';
+    } else {
+      selected = file;
+      status.textContent = `已選取 ${file.size.toLocaleString()} bytes。按「傳送照片」才會上傳。`;
+    }
+    controls();
+  });
+  clear.addEventListener('click', () => {
+    if (busy || ended) return;
+    clearSelection(); status.textContent = '已清除選取；尚未傳送的照片不會上傳。'; controls();
+  });
+  upload.addEventListener('click', async () => {
+    if (busy || ended || !ready || !current() || !selected) return;
+    busy = true; controls();
+    status.textContent = '正在傳送照片，請等待結果…';
+    let bytes = null, encoded = '', file = selected;
+    try {
+      bytes = new Uint8Array(await file.arrayBuffer());
+      if (ended || !current()) return;
+      if (bytes.length !== file.size || bytes.length > MAX_BYTES || bytes[0] !== 255 || bytes[1] !== 216) {
+        throw new Error('invalid JPEG');
+      }
+      // Chunk the conversion to avoid the function argument limit on 1 MB files.
+      for (let offset = 0; offset < bytes.length; offset += 16384) {
+        encoded += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
+      }
+      encoded = btoa(encoded);
+      const result = await request('tools/call', {name: 'attach_photo_bytes', arguments: {
+        session_id: state.session_id, revision: state.revision, jpeg_base64: encoded}}, 60000);
+      if (ended) return;
+      if (result?.isError || !result?.structuredContent?.has_photo) throw new Error('upload rejected');
+      setState(result.structuredContent);
+      if (!ended) status.textContent = '照片已暫存。請回到聊天查看處理後預覽，再確認分析。';
+    } catch {
+      if (!ended) stop('未能確認傳送結果，沒有自動重試。請回到聊天查看工作階段狀態，再重新開啟選檔介面。');
+    } finally {
+      bytes = null; encoded = ''; file = null;
+      clearSelection(); busy = false; controls();
+    }
+  });
+  (async () => {
+    try {
+      if (window.parent === window) throw new Error('host required');
+      const result = await request('ui/initialize', {protocolVersion: VERSION,
+        appInfo: {name: 'PhotoTraits photo picker', version: '1.0.0'},
+        appCapabilities: {availableDisplayModes: ['inline']}}, 15000);
+      if (result?.protocolVersion !== VERSION || !result?.hostCapabilities?.serverTools) throw new Error('unsupported host');
+      ready = true;
+      post({method: 'ui/notifications/initialized', params: {}});
+      status.textContent = '等待工作階段資料…';
+    } catch { stop('此介面需要支援選檔工具的 ChatGPT 主機，請回到聊天。'); }
+  })();
+})();
+</script>
+</html>
