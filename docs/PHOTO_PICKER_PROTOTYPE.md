@@ -1,10 +1,13 @@
 # Local photo picker prototype
 
-2026-10-15. This change is local and undeployed. It adds a second image ingress
-path for the existing owner-authenticated, single-photo MOCK workflow. No new
-download hosts, credentials, storage service, model calls or dependencies are
-needed. Actual ChatGPT support and the host's tool-message size limit remain
-unverified. The prior attachment workflow and its recorded acceptance are separate.
+2026-10-15. This prototype adds a second image ingress path for the existing
+owner-authenticated, single-photo MOCK workflow and has been deployed to the
+existing Free MOCK service. A controlled ChatGPT check confirmed resource retrieval
+but still failed to display the UI; see the resource compatibility evidence below.
+Actual picker/bridge acceptance and the host's tool-message size limit remain
+unverified. No new download hosts, credentials, storage service, model calls or
+dependencies are needed. The prior attachment workflow and its recorded acceptance
+are separate.
 
 ## Flow and boundaries
 
@@ -101,15 +104,51 @@ accuracy. If Node or OAuth extras are absent, their tests explicitly skip; a
 partial run must not be reported as full bridge acceptance. Real metadata checks
 are reported independently by `dev.py check` and never fetch missing data.
 
+## Resource compatibility evidence, 2026-10-15
+
+`resources/read` and `resources/list` accept optional object-valued request
+`_meta`. It is ignored, never reflected or used as authority. Extra parameters,
+non-object metadata, unknown/missing read URIs, insufficient scopes and the
+original 100,000-byte resource request limit remain rejected. Three permanent
+regression tests cover these boundaries.
+
+The diagnostic build `51da15029dd52af1be2252fa042febf6f986b8f0` reached Live on
+the existing Render Free MOCK service at 17:02:27 UTC. Public health returned
+HTTP 200 with mode `mock` and authorization `configured`. Exactly one controlled
+resource retry was performed in the existing synthetic test conversation at
+17:03:41 UTC, without a new tool call, file selection, upload or analysis.
+
+| Observation | Result |
+|---|---|
+| Server resource request at 17:03:42 UTC | `resources/read`, fixed picker URI, `_meta` present |
+| Server dispatch | HTTP 200, RPC `ok`, 203 ms from handler entry; pending observation was 202 ms |
+| ChatGPT widget fetch in browser Network | HTTP 200, 920 ms |
+| Actual host UI | Displayed “無法顯示 PhotoTraits (MOCK)”; no usable picker or bridge acceptance established |
+
+This confirms that the host sends request metadata and that retrieval succeeds
+with the compatibility fix. It does not establish the cause of the earlier host
+timeout or the remaining display failure. The existing fixture session had already
+been cleared; this attempt was limited to the static UI resource, not upload or
+session lifecycle acceptance. The host's pre-existing CSP developer setting was
+observed but unchanged; no causal conclusion is drawn from it.
+
+Temporary diagnostics were limited to the method, fixed URI/redaction, metadata
+presence boolean, elapsed time and HTTP/RPC status, at most 12 requests within
+30 minutes per process and 256 bytes per line. They emitted no raw request,
+metadata, token, header, filename, photo, base64, session ID, field content or
+signed URL. The observer and its temporary tests are removed in this cleanup;
+normal HTTP request logging remains disabled. Nonsensitive findings are retained
+here; local screenshots/check output stay ignored by Git.
+
 ## Next acceptance gate
 
-After separate deployment/plugin-refresh authorization, test the same synthetic
-JPEG through a real ChatGPT host, including the maximum size, cancellation,
-expired/stale sessions and the preview/approval transition. Confirm the host
-accepts the new resource and app-only tool and does not surface base64 to the
-model. A smaller host limit must be handled explicitly, without enlarging the
-downloader allowlist or silently introducing another upload service. This local
-phase performs no deployment, Git push, plugin refresh or paid API use.
+The remaining gate is a scoped host rendering/bridge investigation, followed by
+synthetic JPEG acceptance through a real ChatGPT host: maximum size, cancellation,
+expired/stale sessions and the preview/approval transition. Confirm the app-only
+tool is callable by the view and does not surface base64 to the model. A smaller
+host limit must be handled explicitly, without enlarging the downloader allowlist
+or introducing another upload service. No paid API use or security-policy change
+is authorized by this evidence.
 
 ## Official contracts checked
 
