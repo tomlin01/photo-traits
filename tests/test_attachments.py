@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -80,7 +81,9 @@ class AttachmentTests(unittest.TestCase):
                 self.stage(value)
             self.assertNotIn('private/secret', str(caught.exception))
         self.assertEqual(self.session.revision, 0)
-        self.assertEqual(list(self.session.path.iterdir()), [])
+        self.assertEqual([path.name for path in self.session.path.iterdir()], [a.p.transient.LEASE])
+        self.assertEqual((self.session.path / a.p.transient.LEASE).read_bytes(),
+                         self.engine.storage.marker(self.session.id))
 
     def test_all_remote_urls_paths_redirect_variants_and_dns_are_denied(self):
         urls = ['file:///etc/passwd', '/tmp/photo.jpg', 'data:image/jpeg;base64,AA',
@@ -242,7 +245,12 @@ class AttachmentTests(unittest.TestCase):
         self.assertEqual(self.engine.reserved, 0)
 
     def test_cli_rejects_live_and_offline_isolated_process_starts(self):
-        command = [sys.executable, '-I', '-S', '-B', str(PACKAGE / 'attachment_mock.py'), '--workspace', str(ROOT), '--stdio']
+        # The CLI must never initialize or sweep any existing project data root.
+        (self.root / 'scripts').mkdir()
+        for name in ('AGENTS.md', '.gitignore', 'scripts/traits.py'):
+            shutil.copyfile(ROOT / name, self.root / name)
+        subprocess.run(['git', 'init', '--quiet', str(self.root)], check=True, capture_output=True)
+        command = [sys.executable, '-I', '-S', '-B', str(PACKAGE / 'attachment_mock.py'), '--workspace', str(self.root), '--stdio']
         denied = subprocess.run(command + ['--allow-live'], input='', capture_output=True, text=True, env={}, timeout=5)
         self.assertEqual(denied.returncode, 2)
         handshake = '\n'.join(json.dumps(r) for r in [

@@ -26,7 +26,7 @@ DATASET = Path('data/derived/review-12pit')
 QUESTIONS_FILE = ROOT / 'docs/trait_questions.json'
 ENDPOINT = 'https://api.openai.com/v1/decisions'
 MODEL = 'gpt-6-luna'
-PRICE_DATE = '2026-10-12'
+PRICE_DATE = '2026-10-14'
 INPUT_USD_PER_MILLION = Decimal('0.10')
 # Cover the documented 2x long-context rate AND 10% regional premium.
 UPPER_USD_PER_MILLION = Decimal('0.22')
@@ -377,13 +377,53 @@ def parse_answers(raw, config):
 
 
 def usage_cost(raw):
-    usage = raw.get('usage', {})
+    checked_pricing()
+    if not isinstance(raw, dict) or raw.get('model') != MODEL or 'transport_error' in raw:
+        raise SafeError('Usage must belong to a successful Decisions envelope.')
+    usage = raw.get('usage')
+    if not isinstance(usage, dict):
+        raise SafeError('Missing usage; full reservation retained.')
     count = usage.get('input_tokens')
     if type(count) is not int or not 0 < count <= MAX_INPUT_TOKENS:
         raise SafeError('Missing or out-of-bounds input usage; reserved cost remains charged.')
-    # Input total is conservative even when some cached input is not charged.
+    details, output = usage.get('input_tokens_details'), usage.get('output_tokens_details')
+    if (not isinstance(details, dict) or not isinstance(output, dict)
+            or any(type(details.get(k)) is not int or not 0 <= details[k] <= count
+                   for k in ('cached_tokens', 'cache_write_tokens'))
+            or details['cached_tokens'] + details['cache_write_tokens'] > count
+            or type(usage.get('output_tokens')) is not int or usage['output_tokens'] != 0
+            or type(output.get('reasoning_tokens')) is not int or output['reasoning_tokens'] != 0
+            or type(usage.get('total_tokens')) is not int or usage['total_tokens'] != count):
+        raise SafeError('Incomplete or inconsistent Decisions usage; full reservation retained.')
+    # Charge all input at the upper rate: never subtract cache counters or treat
+    # token-based accounting as an independently verified provider invoice.
     return {'input_tokens': count, 'estimated_base_usd': str(Decimal(count) * INPUT_USD_PER_MILLION / 1_000_000),
-            'cost_upper_usd': str(Decimal(count) * UPPER_USD_PER_MILLION / 1_000_000)}
+            'cost_upper_usd': str(Decimal(count) * UPPER_USD_PER_MILLION / 1_000_000),
+            'accounting_basis': 'validated_usage_at_conservative_input_rate'}
+
+
+def checked_pricing():
+    """Reviewed Decisions-specific contract; unknown/stale prices cannot execute.
+
+    See docs/DECISIONS_BUDGET.md for dated primary sources and activation limits.
+    Decisions has no output-token charge or documented max_output_tokens control.
+    Reserving the model's entire input ceiling avoids guessing image token counts.
+    """
+    try:
+        age = (date.today() - date.fromisoformat(PRICE_DATE)).days
+        valid = (0 <= age <= 7 and MODEL == 'gpt-6-luna'
+                 and ENDPOINT == 'https://api.openai.com/v1/decisions'
+                 and INPUT_USD_PER_MILLION == Decimal('0.10')
+                 and UPPER_USD_PER_MILLION == Decimal('0.22')
+                 and MAX_INPUT_TOKENS == 922_000 and REQUEST_RESERVE_USD == Decimal('0.25'))
+    except (TypeError, ValueError, ArithmeticError):
+        valid = False
+    if not valid:
+        raise SafeError('Current verified Decisions pricing and limits are required; no request permitted.')
+    return {'checked_at': PRICE_DATE, 'model': MODEL, 'endpoint': ENDPOINT,
+            'input_usd_per_million': str(INPUT_USD_PER_MILLION),
+            'upper_usd_per_million': str(UPPER_USD_PER_MILLION),
+            'max_input_tokens': MAX_INPUT_TOKENS, 'reservation_usd': str(REQUEST_RESERVE_USD)}
 
 
 def read_attempt(run, attempt_id):
@@ -416,6 +456,8 @@ def accounting(run, manifest):
 def run_live(run, *, live=False, approve_upload=False, max_new=1, retry_failed_once=False, transport=None):
     if not live or not approve_upload:
         raise SafeError('Live work requires both --live and --approve-upload; no request sent.')
+    if transport is None:
+        raise SafeError('Legacy batch live execution is disabled: it does not use the total project ledger.')
     run = local_path(run)
     manifest, config = load_run(run)
     if not 1 <= max_new <= MAX_IMAGES or not 1 <= len(manifest['images']) <= MAX_IMAGES:

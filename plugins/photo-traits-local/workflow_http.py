@@ -298,6 +298,10 @@ def make_server(engine, verifier, address=('127.0.0.1', 0), *, discovery=None):
     class Server(ThreadingHTTPServer):
         daemon_threads = True
         slots = threading.BoundedSemaphore(8)
+        def service_actions(self):
+            if engine is not None:
+                engine.periodic_cleanup()
+
         def process_request(self, request, client_address):
             if not self.slots.acquire(blocking=False):
                 self.shutdown_request(request)
@@ -335,7 +339,7 @@ def startup(args):
     # Public configuration only. Never look up OPENAI_API_KEY or .env.local.
     verifier = TokenVerifier(issuer=os.environ['PHOTOTRAITS_OAUTH_ISSUER'],
         resource=os.environ['PHOTOTRAITS_RESOURCE'], allowed_subject=os.environ['PHOTOTRAITS_ALLOWED_SUB'])
-    engine = w.WorkflowEngine(args.workspace / 'data/derived/chatgpt-workflow',
+    engine = w.WorkflowEngine(args.workspace / w.p.TRANSIENT_ROOT,
         reader=w.attachments.SafeHTTPS(args.attachment_host, context=w.p.t.tls_context()))
     return make_server(engine, verifier, (args.bind, args.port)), engine
 
@@ -353,16 +357,12 @@ def main():
     args = parser.parse_args()
     try:
         server, engine = startup(args)
-        def cleanup():
-            while True:
-                time.sleep(30)
-                engine.cleanup()
-        if engine is not None:
-            threading.Thread(target=cleanup, daemon=True).start()
         try:
             server.serve_forever()
         finally:
             server.server_close()
+            if engine is not None:
+                engine.close()
     except Exception:
         parser.exit(1, 'Workflow unavailable: check approved configuration and dependencies locally. No credentials were read.\n')
 

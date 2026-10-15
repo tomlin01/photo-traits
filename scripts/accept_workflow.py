@@ -94,15 +94,20 @@ def main():
     rows = list(csv.DictReader(io.StringIO(csv_bytes.decode('utf-8-sig'))))
     if len(rows) != 2 or any(r['evidence_kind'] != 'MOCK_NOT_MODEL_OUTPUT' for r in rows):
         raise RuntimeError('Synthetic CSV assertion failed.')
-    csv_path = engine.root / 'synthetic-results.csv'
+    csv_path = evidence / 'synthetic-results.csv'
     w.p.t.write_new(csv_path, csv_bytes)
-    sources = [PACKAGE / name for name in ('server.py', 'attachments.py', 'workflow.py', 'workflow_http.py',
+    cleared = call('clear_session', {'session_id': sid})['structuredContent']
+    if not cleared['server_files_removed'] or session.path.exists() or engine.sessions:
+        raise RuntimeError('Synthetic immediate-clear assertion failed.')
+    engine.close()
+    sources = [PACKAGE / name for name in ('server.py', 'transient.py', 'budget.py', 'attachments.py', 'workflow.py', 'workflow_http.py',
         'requirements-http.txt', 'capabilities_http.py', 'capabilities_server.py', 'descriptor_probe.py')]
     sources += [ROOT / 'scripts/traits.py']
     report = {'timestamp_utc': stamp, 'status': 'PASS_LOCAL_SYNTHETIC_ONLY', 'test_count': test_count,
               'dependencies': dependencies, 'model_api_calls': 0, 'real_credentials_read': False,
               'real_photo_downloads': 0, 'public_service_started': False, 'host_acceptance': 'NOT_RUN',
-              'photos_remaining': 0, 'csv_sha256': hashlib.sha256(csv_bytes).hexdigest(),
+              'photos_remaining': 0, 'session_removed': True, 'csv_status': 'generated',
+              'csv_sha256': hashlib.sha256(csv_bytes).hexdigest(),
               'csv_path': str(csv_path), 'review_values_are_scripted_fixtures': True,
               'sources_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}}
     (evidence / 'report.json').write_text(json.dumps(report, indent=2) + '\n')

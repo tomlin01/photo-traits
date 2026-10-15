@@ -104,15 +104,17 @@ class MockSession(p.Session):
 
 class MockEngine(p.Engine):
     def __init__(self, root, *, clock=time.monotonic):
-        super().__init__(root)  # No budget, authorization or live argument accepted.
+        super().__init__(root, clock=clock)  # No budget, authorization or live argument accepted.
         self.files = FixtureFiles(clock)
 
     def new(self):
-        if len(self.sessions) >= 8:
-            p.reject('At most eight sessions per local process.')
-        session = MockSession(self)
-        self.sessions[session.id] = session
-        return session
+        with self.sessions_lock:
+            self.cleanup()
+            if self.closed or len(self.sessions) >= 8:
+                p.reject('Session limit reached or process closing; wait for expiry.')
+            session = MockSession(self)
+            self.sessions[session.id] = session
+            return session
 
 
 def tool_definitions():
@@ -168,7 +170,7 @@ def main():
     args = parser.parse_args()
     try:
         workspace = p.bind_workspace(args.workspace)
-        engine = MockEngine(workspace / 'data/derived/attachment-mock-sessions')
+        engine = MockEngine(workspace / p.TRANSIENT_ROOT)
         server = p.serve_http(engine)
         try:
             if args.stdio:
@@ -179,6 +181,7 @@ def main():
         finally:
             server.shutdown()
             server.server_close()
+            engine.close()
     except KeyboardInterrupt:
         pass
     except Exception:

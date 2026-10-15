@@ -150,6 +150,22 @@ class HTTPAcceptanceTests(OAuthFixture, unittest.TestCase):
         self.assertIn('insufficient_scope', body['result']['_meta']['mcp/www_authenticate'][0])
         self.assertFalse(self.engine.sessions)
 
+    def test_clear_requires_fresh_owner_token_scopes_and_deletes_only_owned_session(self):
+        sid = self.tool('new_session', {})['structuredContent']['session_id']
+        session = self.engine.sessions[sid]
+        request = {'jsonrpc': '2.0', 'id': 50, 'method': 'tools/call',
+                   'params': {'name': 'clear_session', 'arguments': {'session_id': sid}}}
+        for kwargs, expected in (({'token': False}, 401),
+                                 ({'changes': {'sub': 'auth0|stranger'}}, 401),
+                                 ({'changes': {'exp': int(time.time()) - 30}}, 401),
+                                 ({'changes': {'scope': 'results:read'}}, 403)):
+            self.assertEqual(self.request('POST', '/mcp', request, **kwargs)[0], expected)
+            self.assertTrue(session.path.exists())
+        result = self.tool('clear_session', {'session_id': sid})['structuredContent']
+        self.assertTrue(result['server_files_removed'])
+        self.assertFalse(session.path.exists())
+        self.assertNotIn(sid, self.engine.sessions)
+
     def test_complete_authenticated_single_photo_mcp_flow(self):
         with patch.object(t, 'load_key', side_effect=AssertionError('No actual key')), \
              patch.object(t, 'post_decisions', side_effect=AssertionError('No model API')):
@@ -158,7 +174,7 @@ class HTTPAcceptanceTests(OAuthFixture, unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(response['result']['serverInfo']['name'], 'PhotoTraits')
             status, _, response = self.request('POST', '/mcp', {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})
-            self.assertEqual(len(response['result']['tools']), 10)
+            self.assertEqual(len(response['result']['tools']), 11)
             self.assertTrue(all(d['securitySchemes'][0]['type'] == 'oauth2' for d in response['result']['tools']))
             self.assertTrue(all(d['_meta']['securitySchemes'] == d['securitySchemes'] for d in response['result']['tools']))
             attach = next(d for d in response['result']['tools'] if d['name'] == 'attach_photo')

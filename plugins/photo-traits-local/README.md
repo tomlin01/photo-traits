@@ -10,6 +10,8 @@ command. See [configuration and acceptance status](../../docs/RENDER_MOCK.md).
 
 - `workflow.py`: one user-confirmed photo, one or two visible fields, separate
   candidate/human values, cancellation and CSV export.
+- `transient.py`: marked temporary storage, per-session process leases and guarded
+  orphan cleanup; see [retention and existing-data boundaries](../../docs/TRANSIENT_SESSIONS.md).
 - `attachments.py`: bounded HTTPS downloads from explicitly approved exact hosts;
   no redirects, private addresses, forwarded credentials or arbitrary file paths.
 - `workflow_http.py`: RS256 OAuth transport, plus explicit health-only locked startup.
@@ -18,10 +20,13 @@ command. See [configuration and acceptance status](../../docs/RENDER_MOCK.md).
   `descriptor_probe.py`: synthetic/diagnostic sources retained for regression tests.
   They are not launched by the Render start command.
 
-All ten workflow tools require a verified principal outside locked mode. OAuth
+All eleven workflow tools require a verified principal outside locked mode. OAuth
 configuration must supply issuer, canonical HTTPS resource and an approved immutable
 subject. Missing configuration cannot create an anonymous workflow. Attachment hosts
 are empty by default. There is no hosted live CLI option or cloud spending ledger.
+The new `clear_session` tool clears only that owner's server session. CSV generation
+starts a maximum five-minute save window within the original 30-minute lifetime;
+generation is not confirmation of delivery. This local cleanup change is undeployed.
 
 ## Local manifest template
 

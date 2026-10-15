@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import urllib.error
 import urllib.request
 
@@ -58,6 +58,15 @@ class PluginTests(unittest.TestCase):
         self.engine = p.Engine(self.root / 'data/derived/plugin-tests')
         self.engine.origin = 'http://127.0.0.1:1'
         self.s = self.engine.new()
+
+    def fixture_engine(self, name, remaining='1', transport=None):
+        store = p.spending.SQLiteBudgetStore.provision(
+            self.root / 'data/derived' / (name + '.sqlite3'),
+            opening_spent_upper_usd=str(Decimal('5') - Decimal(remaining)),
+            opening_evidence_sha256='a' * 64)
+        return p.Engine(self.root / 'data/derived' / name, budget='5',
+                        authorization='synthetic-scope', budget_store=store,
+                        synthetic_transport=transport or (lambda body: response({'questions': body['questions']})))
 
     def prepare(self, selection=None):
         self.s.edit('Synthetic software QA, not biological evidence.', 'Synthetic fixture; single-species workflow', selection or fields(), self.s.revision)
@@ -127,11 +136,11 @@ class PluginTests(unittest.TestCase):
         self.assertIsNone(self.s.confirmed)
 
     def test_price_guard_is_rechecked_before_each_reservation(self):
-        engine = p.Engine(self.root / 'data/derived/stale-price', budget='1', authorization='new-price-fixture')
+        engine = self.fixture_engine('stale-price')
         with patch.object(t, 'PRICE_DATE', '2000-01-01'), patch.object(t, 'load_key') as key:
-            with self.assertRaises(p.Invalid): engine.reserve(self.s.path, 'x')
+            with self.assertRaises(p.Invalid): engine.reserve(self.s.path, 'x', 'a' * 64)
             key.assert_not_called()
-        self.assertEqual(engine.reserved, 0)
+        self.assertEqual(engine.budget_status()['pending_reserved_usd'], '0')
 
     def test_no_execution_without_confirmation_or_after_cancel(self):
         with self.assertRaises(p.Invalid): self.s.execute(self.s.digest())
@@ -177,9 +186,9 @@ class PluginTests(unittest.TestCase):
             with self.assertRaises(p.Invalid): self.s.upload(jpeg().replace(b'\x10\xff', b'\x11\xff'), 'image/jpeg', self.s.revision)
 
     def test_live_needs_separate_operator_budget_user_approval_and_reservation(self):
-        with self.assertRaises(p.Invalid): self.engine.reserve(self.s.path, 'x')
+        with self.assertRaises(p.Invalid): self.engine.reserve(self.s.path, 'x', 'a' * 64)
         with self.assertRaises(p.Invalid): p.Engine(self.root / 'data/derived/live-no-auth', budget='1')
-        engine = p.Engine(self.root / 'data/derived/live', budget='.25', authorization='new-fixture-only')
+        engine = self.fixture_engine('live', remaining='.25')
         self.engine = engine
         self.s = engine.new()
         self.s.edit('Synthetic QA only', 'Fixture', fields(), 0)
@@ -187,15 +196,14 @@ class PluginTests(unittest.TestCase):
         with self.assertRaises(p.Invalid): self.s.confirm(self.s.digest(), [self.s.photos[0]['handle']], False)
         self.s.confirm(self.s.digest(), [self.s.photos[0]['handle']], True)
         bodies = []
-        def fake_post(body, key):
-            self.assertEqual(engine.reserved, Decimal('.25'))
+        def fake_post(body):
+            self.assertEqual(engine.budget_status()['pending_reserved_usd'], '0.25')
             self.assertTrue(list(self.s.path.rglob('*-attempt.json')))
-            self.assertEqual(key, FAKE_KEY)
             bodies.append(body)
             return response({'questions': p.questions(fields())})
-        with patch.object(t, 'load_key', return_value=FAKE_KEY) as key, patch.object(t, 'post_decisions', side_effect=fake_post):
+        with patch.object(t, 'load_key') as key, patch.object(engine, 'synthetic_transport', side_effect=fake_post):
             self.s.execute(self.s.digest()); self.finish()
-            key.assert_called_once()
+            key.assert_not_called()
         self.assertEqual(self.s.status, 'completed')
         self.assertEqual(set(bodies[0]), {'model', 'input', 'questions'})
         self.assertEqual(bodies[0]['model'], 'gpt-6-luna')
@@ -203,40 +211,42 @@ class PluginTests(unittest.TestCase):
         for secret in [FAKE_KEY, 'individual_label', 'source_sex', 'source_length', 'filename']:
             self.assertNotIn(secret, json.dumps(bodies[0]))
         with self.assertRaises(p.Invalid): engine.reserve(self.s.path, 'excess')
-        with self.assertRaises(FileExistsError): p.Engine(engine.root, budget='.25', authorization='new-fixture-only')
+        restarted = p.Engine(engine.root, budget='5', authorization='synthetic-scope',
+                             budget_store=engine.budget_store, synthetic_transport=engine.synthetic_transport)
+        self.assertEqual(restarted.budget_status(), engine.budget_status())
         for path in engine.root.rglob('*.json'):
             self.assertNotIn(FAKE_KEY, path.read_text())
             self.assertNotIn('data:image/', path.read_text())
 
     def test_transport_error_is_sanitized_reserved_and_not_retried(self):
-        engine = p.Engine(self.root / 'data/derived/live-error', budget='.50', authorization='new-error-fixture')
+        engine = self.fixture_engine('live-error', remaining='.50')
         self.engine, self.s = engine, engine.new()
         self.s.edit('Synthetic QA only', 'Fixture', fields(), 0)
         self.s.upload(jpeg(), 'image/jpeg', self.s.revision)
         self.s.confirm(self.s.digest(), [self.s.photos[0]['handle']], True)
         with patch.object(t, 'load_key', return_value=FAKE_KEY), \
-             patch.object(t, 'post_decisions', side_effect=RuntimeError(FAKE_KEY)) as post:
+             patch.object(engine, 'synthetic_transport', side_effect=RuntimeError(FAKE_KEY)) as post:
             run_id = self.s.execute(self.s.digest()); self.finish()
             self.assertEqual(self.s.execute(self.s.digest()), run_id)
             self.assertEqual(post.call_count, 1)
         self.assertEqual(self.s.status, 'failed')
-        self.assertEqual(engine.reserved, Decimal('.25'))
+        self.assertEqual(engine.budget_status()['pending_reserved_usd'], '0.25')
         for path in engine.root.rglob('*.json'):
             self.assertNotIn(FAKE_KEY, path.read_text())
 
     def test_cancel_during_attempt_stops_following_photo(self):
-        engine = p.Engine(self.root / 'data/derived/live-cancel', budget='1', authorization='new-cancel-fixture')
+        engine = self.fixture_engine('live-cancel')
         self.engine, self.s = engine, engine.new()
         self.s.edit('Synthetic QA only', 'Fixture', fields(), 0)
         self.s.upload(jpeg(), 'image/jpeg', self.s.revision)
         self.s.upload(jpeg().replace(b'\x10\xff', b'\x11\xff'), 'image/jpeg', self.s.revision)
         self.s.confirm(self.s.digest(), [r['handle'] for r in self.s.photos], True)
         entered, release = threading.Event(), threading.Event()
-        def fake_post(body, key):
+        def fake_post(body):
             entered.set()
             release.wait(2)
             return response({'questions': body['questions']})
-        with patch.object(t, 'load_key', return_value=FAKE_KEY), patch.object(t, 'post_decisions', side_effect=fake_post) as post:
+        with patch.object(t, 'load_key', return_value=FAKE_KEY), patch.object(engine, 'synthetic_transport', side_effect=fake_post) as post:
             self.s.execute(self.s.digest())
             self.assertTrue(entered.wait(2))
             self.s.cancel()
@@ -244,7 +254,7 @@ class PluginTests(unittest.TestCase):
             release.set(); self.finish()
             self.assertEqual(post.call_count, 1)
         self.assertEqual(self.s.status, 'cancelled')
-        self.assertEqual(engine.reserved, Decimal('.25'))
+        self.assertEqual(engine.budget_status()['settled_upper_usd'], '0.00022')
         self.assertEqual(len(self.s.results), 1)
 
     def test_response_refusal_unknown_and_invalid_values(self):
@@ -319,6 +329,23 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(responses[2]['result']['structuredContent']['mode'], 'mock')
         self.assertTrue(responses[3]['result']['isError'])
         self.assertNotIn(FAKE_KEY, output.getvalue())
+
+    def test_local_clear_requires_session_token_and_same_origin(self):
+        server = p.serve_http(self.engine)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = self.engine.origin + '/s/' + self.s.id + '/clear'
+        correct = {'Authorization': 'Bearer ' + self.s.token, 'Origin': self.engine.origin,
+                   'Content-Type': 'application/json'}
+        for changes in ({'Authorization': ''}, {'Authorization': 'Bearer wrong'}, {'Origin': ''},
+                        {'Origin': 'https://untrusted.example'}):
+            with self.assertRaises(urllib.error.HTTPError):
+                opener.open(urllib.request.Request(url, headers={**correct, **changes}, data=b'{}'), timeout=2)
+            self.assertTrue(self.s.path.exists())
+        with opener.open(urllib.request.Request(url, headers=correct, data=b'{}'), timeout=2) as response:
+            self.assertTrue(json.load(response)['server_files_removed'])
+        self.assertFalse(self.s.path.exists())
 
 
 class PackageTests(unittest.TestCase):
