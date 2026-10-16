@@ -15,7 +15,8 @@ command. See [configuration and acceptance status](../../docs/RENDER_MOCK.md).
 - `attachments.py`: bounded HTTPS downloads from explicitly approved exact hosts;
   no redirects, private addresses, forwarded credentials or arbitrary file paths.
 - `workflow_http.py`: RS256 OAuth transport, plus explicit health-only locked startup.
-- `photo_picker.html`: optional MOCK file picker using the MCP Apps bridge;
+- `photo_picker.html`: optional MOCK file picker using the MCP Apps bridge, with
+  a server-received sanitized preview and complete field rubric before chat approval;
   see [prototype limits and validation](../../docs/PHOTO_PICKER_PROTOTYPE.md).
 - `server.py` / `ui.html`: the shared core and optional loopback review interface.
 - `attachment_mock.py`, `capabilities_server.py`, `capabilities_http.py`, and

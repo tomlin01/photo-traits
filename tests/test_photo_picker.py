@@ -163,6 +163,29 @@ class PhotoPickerTests(unittest.TestCase):
         self.assertEqual(self.s.revision, revision)
         self.reader.download.assert_called_once()
 
+    def test_card_preview_and_field_edit_never_approve_and_old_offer_is_cleared(self):
+        self.attach()
+        before = self.call('preview_plan')
+        plan = before['structuredContent']['plan']
+        self.assertEqual(plan['revision'], self.s.revision)
+        self.assertEqual(plan['photos'][0]['sha256'], t.sha(base64.b64decode(before['content'][1]['data'])))
+        self.assertEqual(plan['fields'], fixture.fields()[:1])
+        self.assertIsNone(self.s.confirmed)
+        photo = copy.deepcopy(self.s.photos)
+        self.call('plan_fields', {'revision': self.s.revision, 'purpose': 'Synthetic updated rubric.',
+            'species_scope': 'Synthetic single species', 'fields': fixture.fields()[1:]})
+        self.assertIsNone(self.s.offer)
+        self.assertIsNone(self.s.confirmed)
+        self.assertEqual(self.s.photos, photo)
+        self.assertEqual(self.s.revision, plan['revision'] + 1)
+        after = self.call('preview_plan')['structuredContent']
+        self.assertNotEqual(after['plan']['plan_sha256'], plan['plan_sha256'])
+        self.assertNotEqual(after['confirmation_id'], before['structuredContent']['confirmation_id'])
+        self.assertEqual(after['plan']['fields'], fixture.fields()[1:])
+        self.assertIsNone(self.s.confirmed)
+        self.assertIsNone(self.s.thread)
+        self.assertEqual(self.engine.reserved, 0)
+
     def test_concurrent_replacement_cannot_supply_another_uploads_reply_revision(self):
         for prior_ingress in ('none', 'bytes', 'descriptor'):
             with self.subTest(prior_ingress=prior_ingress):
@@ -432,12 +455,16 @@ class PhotoPickerHTTPTests(http_fixture.OAuthFixture, unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('node'), 'Node is needed only for the simulated UI bridge test.')
     def test_actual_ui_script_through_simulated_host_and_real_loopback_mcp(self):
-        picker = self.tool('open_photo_picker', {'session_id': self.sid, 'revision': 1})
+        self.tool('plan_fields', {'session_id': self.sid, 'revision': 1,
+            'purpose': 'Synthetic full rubric.', 'species_scope': 'Synthetic single species',
+            'fields': fixture.fields()[:2]})
+        picker = self.tool('open_photo_picker', {'session_id': self.sid, 'revision': 2})
         _, _, resource = self.rpc('resources/read', {'uri': h.w.PICKER_URI})
         # Ephemeral synthetic token exists only in child stdin/memory, never argv,
         # files, browser state, logs or the production HTML/script sandbox.
         config = {'port': self.server.server_port, 'token': self.token(), 'picker': picker,
-                  'html': resource['result']['contents'][0]['text'], 'jpeg': encoded(padded_jpeg(1_000_000))}
+                  'html': resource['result']['contents'][0]['text'], 'jpeg': encoded(padded_jpeg(1_000_000)),
+                  'field_types': fixture.fields()}
         with patch.object(t, 'load_key', side_effect=AssertionError('No model key')), \
              patch.object(t, 'post_decisions', side_effect=AssertionError('No model API')):
             result = subprocess.run([shutil.which('node'), str(Path(__file__).with_name('photo_picker_bridge.mjs'))],
@@ -449,10 +476,16 @@ class PhotoPickerHTTPTests(http_fixture.OAuthFixture, unittest.TestCase):
         self.assertEqual(report['evidence_kind'], 'SIMULATED_MCP_APPS_BRIDGE')
         self.assertEqual(report['jpeg_bytes'], 1_000_000)
         self.assertEqual(report['mcp_uploads'], 1)
+        self.assertEqual(report['mcp_previews'], 1)
+        self.assertIn('received_preview_and_complete_fields', report['checks'])
+        self.assertIn('stale_revision_and_late_decode', report['checks'])
         self.assertGreater(report['rpc_bytes'], h.MAX_BODY)
         self.assertLessEqual(report['rpc_bytes'], h.MAX_UPLOAD_BODY)
         print('Picker bridge: ' + json.dumps(report, sort_keys=True))
         session = self.engine.sessions[self.sid]
         self.assertEqual(session.photos[0]['original_sha256'], t.sha(base64.b64decode(config['jpeg'])))
         self.assertIsNone(session.thread)
+        self.assertIsNone(session.confirmed)
+        self.assertEqual(session.status, 'draft')
+        self.assertEqual(self.engine.reserved, 0)
         self.reader.download.assert_not_called(); self.reader.check_descriptor.assert_not_called()
