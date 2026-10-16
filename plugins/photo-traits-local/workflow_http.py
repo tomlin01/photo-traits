@@ -19,6 +19,9 @@ _spec = importlib.util.spec_from_file_location('phototraits_workflow', Path(__fi
 w = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(w)
 MAX_BODY = 100_000
+# A 1 MB JPEG needs at most 1,333,336 base64 characters plus a small RPC envelope.
+# Only attach_photo_bytes may exceed MAX_BODY, after authentication and parsing.
+MAX_UPLOAD_BODY = 1_350_000
 PROTOCOLS = ('2025-11-25', '2025-06-18', '2025-03-26')
 
 
@@ -112,6 +115,8 @@ def error(request_id, code, message):
 
 
 def dispatch(engine, principal, raw):
+    if len(raw) > MAX_UPLOAD_BODY:
+        return 400, error(None, -32600, 'Request too large.')
     try:
         request = json_bytes(raw)
     except (ValueError, UnicodeDecodeError, RecursionError):
@@ -124,19 +129,41 @@ def dispatch(engine, principal, raw):
     if request.get('jsonrpc') != '2.0' or request.keys() - {'jsonrpc', 'id', 'method', 'params'}:
         return 400, error(None, -32600, 'Invalid request.')
     method, params = request.get('method'), request.get('params', {})
+    if len(raw) > MAX_BODY and not (method == 'tools/call' and isinstance(params, dict)
+                                     and params.get('name') == 'attach_photo_bytes'):
+        return 400, error(None, -32600, 'Request too large.')
     if method == 'notifications/initialized' and 'id' not in request and params == {}:
         return 202, None
     if not good_id or not isinstance(params, dict):
         return 400, error(None, -32600, 'Invalid request.')
     if method == 'initialize':
         result = {'protocolVersion': params.get('protocolVersion') if params.get('protocolVersion') in PROTOCOLS else PROTOCOLS[0],
-                  'capabilities': {'tools': {'listChanged': False}},
+                  'capabilities': {'tools': {'listChanged': False},
+                                   'resources': {'subscribe': False, 'listChanged': False},
+                                   'extensions': {'io.modelcontextprotocol/ui': {'mimeTypes': [w.PICKER_MIME]}}},
                   'serverInfo': {'name': 'PhotoTraits', 'version': '0.2.0'},
                   'instructions': 'One photo and one or two user-confirmed visible traits. Show preview and rubric; require human approval before analysis and corrections. Do not invent approval. MOCK is never model output.'}
     elif method == 'ping' and params == {}:
         result = {}
     elif method == 'tools/list' and params == {}:
         result = {'tools': w.tool_definitions()}
+    elif method in ('resources/list', 'resources/read'):
+        if not isinstance(principal, w.Principal) or not set(w.SCOPES) <= principal.scopes:
+            return 403, error(request_id, -32001, 'Required authorization scope is missing.')
+        allowed = {'_meta'} if method == 'resources/list' else {'uri', '_meta'}
+        if params.keys() - allowed or ('_meta' in params and not isinstance(params['_meta'], dict)):
+            return 400, error(request_id, -32602, 'Invalid UI resource parameters.')
+        resource = {'uri': w.PICKER_URI, 'name': 'PhotoTraits photo picker', 'mimeType': w.PICKER_MIME}
+        if method == 'resources/list':
+            result = {'resources': [resource]}
+        elif params.get('uri') == w.PICKER_URI:
+            # Only a static packaged resource; never turn a URI into a filesystem path.
+            result = {'contents': [{'uri': w.PICKER_URI, 'mimeType': w.PICKER_MIME,
+                'text': Path(__file__).with_name('photo_picker.html').read_text(encoding='utf-8'),
+                '_meta': {'ui': {'prefersBorder': True,
+                                'csp': {'connectDomains': [], 'resourceDomains': [], 'frameDomains': []}}}}]}
+        else:
+            return 400, error(request_id, -32602, 'Unknown UI resource.')
     elif method == 'tools/call':
         try:
             # MCP permits omitted arguments and request metadata. Metadata is not
@@ -278,8 +305,8 @@ def make_server(engine, verifier, address=('127.0.0.1', 0), *, discovery=None):
             lengths = self.headers.get_all('Content-Length', [])
             if (self.headers.get_all('Transfer-Encoding') or self.headers.get_all('Content-Encoding')
                     or self.headers.get_all('Content-Type', []) != ['application/json']
-                    or len(lengths) != 1 or not re.fullmatch(r'[0-9]{1,6}', lengths[0])
-                    or not 0 < int(lengths[0]) <= MAX_BODY):
+                    or len(lengths) != 1 or not re.fullmatch(r'[0-9]{1,7}', lengths[0])
+                    or not 0 < int(lengths[0]) <= MAX_UPLOAD_BODY):
                 return self.send_error(400)
             if self.headers.get('MCP-Protocol-Version', PROTOCOLS[0]) not in PROTOCOLS:
                 return self.send_error(400)
@@ -298,6 +325,10 @@ def make_server(engine, verifier, address=('127.0.0.1', 0), *, discovery=None):
     class Server(ThreadingHTTPServer):
         daemon_threads = True
         slots = threading.BoundedSemaphore(8)
+        def service_actions(self):
+            if engine is not None:
+                engine.periodic_cleanup()
+
         def process_request(self, request, client_address):
             if not self.slots.acquire(blocking=False):
                 self.shutdown_request(request)
@@ -335,7 +366,7 @@ def startup(args):
     # Public configuration only. Never look up OPENAI_API_KEY or .env.local.
     verifier = TokenVerifier(issuer=os.environ['PHOTOTRAITS_OAUTH_ISSUER'],
         resource=os.environ['PHOTOTRAITS_RESOURCE'], allowed_subject=os.environ['PHOTOTRAITS_ALLOWED_SUB'])
-    engine = w.WorkflowEngine(args.workspace / 'data/derived/chatgpt-workflow',
+    engine = w.WorkflowEngine(args.workspace / w.p.TRANSIENT_ROOT,
         reader=w.attachments.SafeHTTPS(args.attachment_host, context=w.p.t.tls_context()))
     return make_server(engine, verifier, (args.bind, args.port)), engine
 
@@ -353,16 +384,12 @@ def main():
     args = parser.parse_args()
     try:
         server, engine = startup(args)
-        def cleanup():
-            while True:
-                time.sleep(30)
-                engine.cleanup()
-        if engine is not None:
-            threading.Thread(target=cleanup, daemon=True).start()
         try:
             server.serve_forever()
         finally:
             server.server_close()
+            if engine is not None:
+                engine.close()
     except Exception:
         parser.exit(1, 'Workflow unavailable: check approved configuration and dependencies locally. No credentials were read.\n')
 

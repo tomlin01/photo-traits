@@ -61,11 +61,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(self.s.thread.is_alive())
 
     def live_fixture(self, budget='.25'):
+        self.store = w.p.spending.SQLiteBudgetStore.provision(self.root / 'data/derived/budget.sqlite3',
+            opening_spent_upper_usd=str(Decimal('5') - Decimal(budget)), opening_evidence_sha256='a' * 64)
+        transport = Mock(side_effect=lambda body: response({'questions': body['questions']}))
         self.engine = w.WorkflowEngine(self.root / 'data/derived/live', reader=self.reader,
-            budget=budget, authorization='SYNTHETIC-TRANSPORT-ONLY', durable_cost_ledger=True)
+            budget='5', authorization='SYNTHETIC-TRANSPORT-ONLY', budget_store=self.store,
+            synthetic_transport=transport)
         self.s = self.engine.new(self.principal)
         self.engine.load_key = Mock(return_value=FAKE_KEY)
-        self.engine.post_decisions = Mock(side_effect=lambda body, key: response({'questions': body['questions']}))
+        self.engine.post_decisions = Mock(side_effect=AssertionError('No real transport'))
 
     def test_end_to_end_plan_attach_confirm_mock_review_csv(self):
         with patch.object(t, 'load_key', side_effect=AssertionError('No key')), \
@@ -193,28 +197,28 @@ class WorkflowTests(unittest.TestCase):
         self.analyze(offer)
         self.finish()
         self.analyze(offer)
-        self.engine.post_decisions.assert_called_once()
-        body = self.engine.post_decisions.call_args.args[0]
+        self.engine.synthetic_transport.assert_called_once()
+        body = self.engine.synthetic_transport.call_args.args[0]
         self.assertEqual([q['name'] for q in body['questions']], ['surface_mark'])
         self.assertEqual(body['model'], 'gpt-6-luna')
         encoded_image = body['input'][0]['content'][1]['image_url'].split(',', 1)[1]
         self.assertEqual(base64.b64decode(encoded_image), clean)
         for private in ('SIGNED_SECRET', 'PRIVATE_FILE_ID', 'PRECISE_LOCATION', 'species_scope', 'individual_label'):
             self.assertNotIn(private, json.dumps(body))
-        self.assertEqual(self.engine.reserved, Decimal('.25'))
+        self.assertEqual(self.store.snapshot()['settled_upper_usd'], '0.00022')
         self.assertFalse(list(self.s.path.glob('*.jpg')))
 
     def test_failure_unknown_reserved_once_no_automatic_retry(self):
         self.live_fixture()
         offer = self.prepare()
-        self.engine.post_decisions.side_effect = RuntimeError('SIGNED_SECRET ' + FAKE_KEY)
+        self.engine.synthetic_transport.side_effect = RuntimeError('SIGNED_SECRET ' + FAKE_KEY)
         self.analyze(offer); self.finish(); self.analyze(offer)
-        self.engine.post_decisions.assert_called_once()
+        self.engine.synthetic_transport.assert_called_once()
         self.assertEqual(self.s.status, 'failed')
         self.assertTrue(all(v == {'value': None, 'confidence': None, 'status': 'unknown_error'}
                             for v in self.s.results[0]['candidate'].values()))
         self.assertNotIn(FAKE_KEY, json.dumps(self.s.state()))
-        self.assertEqual(self.engine.reserved, Decimal('.25'))
+        self.assertEqual(self.store.snapshot()['pending_reserved_usd'], '0.25')
         self.assertFalse(list(self.s.path.glob('*.jpg')))
 
     def test_cancel_before_key_after_reservation_never_sends(self):
@@ -222,45 +226,135 @@ class WorkflowTests(unittest.TestCase):
         offer = self.prepare()
         reserve = self.engine.reserve
         def reserve_then_cancel(*args):
-            reserve(*args)
+            receipt = reserve(*args)
             self.s.cancel()
+            return receipt
         self.engine.reserve = reserve_then_cancel
         self.analyze(offer); self.finish(); self.analyze(offer)
         self.engine.load_key.assert_not_called()
         self.engine.post_decisions.assert_not_called()
         self.assertEqual(self.s.status, 'cancelled')
-        self.assertEqual(self.engine.reserved, Decimal('.25'))
+        self.assertEqual(self.store.snapshot()['pending_reserved_usd'], '0.25')
 
     def test_cancel_in_flight_does_not_duplicate_attempt(self):
         self.live_fixture()
         offer = self.prepare()
         entered, release = threading.Event(), threading.Event()
-        def in_flight(body, key):
+        def in_flight(body):
             entered.set(); release.wait(2)
             return response({'questions': body['questions']})
-        self.engine.post_decisions.side_effect = in_flight
+        self.engine.synthetic_transport.side_effect = in_flight
         self.analyze(offer)
         self.assertTrue(entered.wait(2))
         self.s.cancel(); self.analyze(offer)
         release.set(); self.finish(); self.analyze(offer)
-        self.engine.post_decisions.assert_called_once()
+        self.engine.synthetic_transport.assert_called_once()
         self.assertEqual(self.s.status, 'cancelled')
 
     def test_ephemeral_live_gate_budget_exhaustion_and_restarts(self):
         with self.assertRaises(w.p.Invalid):
             w.WorkflowEngine(self.root / 'data/derived/ephemeral', budget='.25')
         with self.assertRaises(w.p.Invalid):
-            w.WorkflowEngine(self.root / 'data/derived/excess', budget='5.01', durable_cost_ledger=True)
+            w.WorkflowEngine(self.root / 'data/derived/excess', budget='5.01')
         self.live_fixture()
         offer = self.prepare(); self.analyze(offer); self.finish()
         self.s = self.engine.new(self.principal)
         offer = self.prepare(); self.analyze(offer); self.finish()
-        self.engine.post_decisions.assert_called_once()
-        self.engine.load_key.assert_called_once()
+        self.engine.synthetic_transport.assert_called_once()
+        self.engine.load_key.assert_not_called()
         self.assertEqual(self.s.status, 'failed')
         self.assertTrue(all(v['value'] is None for v in self.s.results[0]['candidate'].values()))
-        with self.assertRaises(FileExistsError):
-            w.WorkflowEngine(self.engine.root, budget='.25', authorization='SYNTHETIC-TRANSPORT-ONLY', durable_cost_ledger=True)
+        restarted = w.WorkflowEngine(self.engine.root, budget='5', authorization='SYNTHETIC-TRANSPORT-ONLY',
+            budget_store=self.store, synthetic_transport=self.engine.synthetic_transport)
+        self.assertEqual(restarted.budget_status(), self.engine.budget_status())
+
+    def test_boolean_durability_flag_cannot_unlock_any_live_path(self):
+        with self.assertRaises(TypeError):
+            w.WorkflowEngine(self.root / 'data/derived/not-live', budget='5',
+                             authorization='scope', durable_cost_ledger=True)
+        self.live_fixture()
+        with self.assertRaises(w.p.Invalid), patch.object(t, 'load_key') as key:
+            w.WorkflowEngine(self.engine.root, budget='5', authorization='scope', budget_store=self.store)
+        key.assert_not_called()
+
+    def test_commit_acknowledgment_loss_keeps_reservation_without_sending(self):
+        self.live_fixture()
+        offer = self.prepare()
+        reserve = self.store.reserve
+        def lost_ack(*args):
+            reserve(*args)
+            raise w.p.spending.BudgetError('Synthetic lost commit acknowledgment.')
+        with patch.object(self.store, 'reserve', side_effect=lost_ack):
+            self.analyze(offer); self.finish(); self.analyze(offer)
+        self.engine.load_key.assert_not_called()
+        self.engine.synthetic_transport.assert_not_called()
+        self.engine.post_decisions.assert_not_called()
+        self.assertEqual(self.store.snapshot()['pending_reserved_usd'], '0.25')
+        self.assertEqual(self.s.status, 'failed')
+        self.assertFalse(list(self.s.path.glob('*.jpg')))
+
+    def test_storage_lost_between_reserve_and_send_blocks_transport(self):
+        self.live_fixture()
+        offer = self.prepare()
+        reserve = self.engine.reserve
+        def remove_after_reserve(*args):
+            receipt = reserve(*args)
+            self.store.path.rename(self.store.path.with_suffix('.unavailable'))
+            return receipt
+        with patch.object(self.engine, 'reserve', side_effect=remove_after_reserve):
+            self.analyze(offer); self.finish()
+        self.engine.synthetic_transport.assert_not_called()
+        self.engine.load_key.assert_not_called()
+        self.assertFalse(self.store.path.exists())
+        self.assertEqual(self.s.status, 'failed')
+
+    def test_settlement_failure_keeps_hold_and_safe_response_without_retry(self):
+        self.live_fixture()
+        offer = self.prepare()
+        with patch.object(self.store, 'settle', side_effect=w.p.spending.BudgetError('Synthetic outage')):
+            self.analyze(offer); self.finish(); self.analyze(offer)
+        self.assertEqual(self.store.snapshot()['pending_reserved_usd'], '0.25')
+        self.engine.synthetic_transport.assert_called_once()
+        self.assertEqual(len(list(self.s.path.rglob('*-response.json'))), 1)
+        self.assertTrue(all(c['value'] is None for c in self.s.results[0]['candidate'].values()))
+
+    def test_errors_missing_usage_refusal_and_unknown_keep_safe_values(self):
+        self.live_fixture(budget='5')
+        for kind in ('timeout', 'http429', 'missing_usage', 'bad_model', 'refusal', 'unknown'):
+            with self.subTest(kind=kind):
+                self.s = self.engine.new(self.principal)
+                offer = self.prepare(count=1)
+                raw = response({'questions': w.p.questions(fields()[:1])})
+                if kind == 'missing_usage': raw.pop('usage')
+                if kind == 'bad_model': raw['model'] = 'other-model'
+                if kind == 'http429': raw = {'transport_error': 'http_error', 'http_status': 429}
+                if kind == 'refusal': raw['answers'] = [{'name': 'surface_mark', 'type': 'refusal'}]
+                if kind == 'unknown': raw = response({'questions': w.p.questions(fields()[:1])}, {'surface_mark': 'unknown'})
+                self.engine.synthetic_transport.reset_mock()
+                self.engine.synthetic_transport.side_effect = TimeoutError('PRIVATE_TRANSPORT_DETAIL') if kind == 'timeout' else lambda body: raw
+                self.analyze(offer); self.finish(); self.analyze(offer)
+                self.engine.synthetic_transport.assert_called_once()
+                self.engine.post_decisions.assert_not_called()
+                self.engine.load_key.assert_not_called()
+                value = self.s.results[0]['candidate']['surface_mark']['value']
+                self.assertEqual(value, 'unknown' if kind == 'unknown' else None)
+                self.assertFalse(list(self.s.path.glob('*.jpg')))
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot['pending_attempts'], 4)
+        self.assertEqual(snapshot['settled_upper_usd'], '0.00044')
+
+    def test_model_candidate_and_human_override_remain_distinct_in_csv(self):
+        self.live_fixture()
+        offer = self.prepare(count=1)
+        self.analyze(offer); self.finish()
+        safe_response = next(self.s.path.rglob('*-response.json')).read_bytes()
+        self.call('review_values', {'plan_sha256': self.s.digest(), 'values': {'surface_mark': 'absent'}})
+        rows = list(csv.DictReader(io.StringIO(self.s.csv_bytes().decode('utf-8-sig'))))
+        self.assertEqual(rows[0]['model_candidate'], 'present')
+        self.assertEqual(rows[0]['human_value'], 'absent')
+        self.assertEqual(rows[0]['evidence_kind'], 'SYNTHETIC_NOT_MODEL_OUTPUT')
+        self.assertEqual(next(self.s.path.rglob('*-response.json')).read_bytes(), safe_response)
+        self.assertFalse(self.s.results[0]['model_called'])
 
     def test_malformed_metadata_jpeg_and_unknown_review_values_rejected(self):
         self.reader.download.return_value = b'not a JPEG'

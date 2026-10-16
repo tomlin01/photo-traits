@@ -24,6 +24,10 @@ See [sanitized configuration and acceptance status](docs/RENDER_MOCK.md) and
 No photos, research data, CSV results, credentials or local account configuration
 belong in this baseline. Committing it does not update the running service.
 
+The [local photo picker prototype](docs/PHOTO_PICKER_PROTOTYPE.md) adds an optional
+MOCK-only file input and bounded bytes tool. It is undeployed; its simulated host
+tests do not establish actual ChatGPT file-picker or bridge-size support.
+
 ## Local validation
 
 Use Python 3.12 or newer. Core metadata and local mock paths use the standard
@@ -66,6 +70,16 @@ manifest are described in [the package README](plugins/photo-traits-local/README
 The existing model core uses Decisions API / `gpt-6-luna`. Real model calls require
 separate data-scope and budget approval, current official documentation, secure
 backend key setup and durable spending controls. Cloud live startup is unavailable.
+
+The [2026-10-14 local Decisions/budget stage](docs/DECISIONS_BUDGET.md) adds a
+shared cumulative US$5 ledger interface, an explicitly non-production SQLite
+reference, US$0.25 atomic reservations, strict usage accounting and synthetic
+fault/restart tests. It does not activate live mode or fund a fresh budget per run.
+
+The [local cleanup stage](docs/TRANSIENT_SESSIONS.md) returns CSV for the user to save,
+limits sessions to 30 minutes and to at most five minutes after first generation,
+and adds authenticated clear plus guarded restart cleanup in a new temporary root.
+It leaves old output roots and the budget ledger alone and has not been deployed.
 
 Source data is CC BY 4.0: retain attribution, version and changes when sharing
 approved derivatives. The source data licence does not license this code;
